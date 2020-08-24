@@ -1,5 +1,5 @@
 # Digital_Pathology
-------
+
 ### Description of the task
 
 The general goal of this project is to classify images of tissue as either diseased or non-diseased. These images of tissue are composed of numerous cells that are individually diseased or non-diseased. Because of this, being able to classify the entire image is not very useful. 
