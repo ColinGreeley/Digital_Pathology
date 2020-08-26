@@ -29,10 +29,13 @@ def make_model(input_size):
 def make_data_generator(test=False):
     if test:
         generator = tf.keras.preprocessing.image.ImageDataGenerator(
-                    rescale=1./255,
-                    rotation_range=20, 
-                    horizontal_flip=True,
-                    vertical_flip=True)
+                    rescale=1./255)
+                    #rotation_range=30, 
+                    #zoom_range=0.1,
+                    #width_shift_range=0.2,
+                    #height_shift_range=0.2,
+                    #horizontal_flip=True,
+                    #vertical_flip=True)
     else:
         generator = tf.keras.preprocessing.image.ImageDataGenerator(
                     rescale=1./255)
@@ -212,7 +215,7 @@ def experiment_3(X, y, input_size, feature_extractor, batch_size, v=10):
 
 if __name__ == "__main__":
 
-    data_dir = '../data/randomtiles512/randomtiles512/'
+    data_dir = '../data/randomtiles/randomtiles/'
     batch_size = 32
     picture_count = (len(os.listdir(data_dir + 'diseased/')) + 
                     len(os.listdir(data_dir + 'non_diseased/')))
