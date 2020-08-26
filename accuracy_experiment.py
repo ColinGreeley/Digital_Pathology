@@ -2,6 +2,7 @@ import tensorflow as tf
 from tensorflow.keras.applications import InceptionResNetV2
 from tensorflow.keras import layers, models, Model
 from sklearn.model_selection import train_test_split
+from sklearn.utils import shuffle
 import numpy as np
 from PIL import Image
 import os
@@ -29,12 +30,9 @@ def make_data_generator(test=False):
     if test:
         generator = tf.keras.preprocessing.image.ImageDataGenerator(
                     rescale=1./255,
-                    rotation_range=40, 
-                    width_shift_range=0.1,
-                    height_shift_range=0.1,
+                    rotation_range=20, 
                     horizontal_flip=True,
-                    vertical_flip=True,
-                    zoom_range=0.2)
+                    vertical_flip=True)
     else:
         generator = tf.keras.preprocessing.image.ImageDataGenerator(
                     rescale=1./255)
@@ -55,8 +53,10 @@ def get_data(data_dir):
     print("Total images:", len(diseased_images) + len(non_diseased_images))
 
     data = np.append(diseased_images, non_diseased_images, axis=0)
-    # diseased <= [1, 0], non_diseased <= [0, 1] for categorical labels
     labels = np.append([0 for i in range(len(diseased_images))], [1 for i in range(len(non_diseased_images))], axis=0)
+    
+    # shuffle the data and labels together
+    data, labels = shuffle(data, labels)
     return data, labels
 
 def extract_features(data, sample_count, input_size, datagen, feature_extractor, batch_size):
@@ -137,7 +137,7 @@ def experiment_2(data, batch_size, input_size, experiment_count=10):
     results = list()
 
     for i in range(experiment_count):
-        print("Run " + str(i) + '/' + str(experiment_count))
+        print("Run " + str(i+1) + '/' + str(experiment_count))
         model = make_model(input_size)
         model.fit(x_train, y_train, batch_size=batch_size, epochs=100, 
                     validation_data=(x_val, y_val), verbose=0)
@@ -149,20 +149,68 @@ def experiment_2(data, batch_size, input_size, experiment_count=10):
     print("Variance:", variance)
 
     
-def experiment_3():
+def experiment_3(X, y, input_size, feature_extractor, batch_size, v=10): # (fairly slow, processing time increases linearly with v)
 
     print('\n-------------------\n    Experiment 3\n-------------------')
-    # 1. Randomly partition X in to v TestingSets of N/v images each
-    # 2. For i = 1 to v
-    #        Let LearningSet = X – TestingSet_i
-    #        Let ValidationSet = 0.2*|LearningSet| images selected at random from LearningSet
-    #        TrainingSet = LearningSet – ValidationSet
-    #        Train model using TrainingSet and ValidationSet
-    #        Test model on TestingSet_i, retain accuracy_i
-    # 3. Report mean and variance over accuracy_i
-    
-    
 
+    train_generator = make_data_generator()
+    test_generator = make_data_generator(test=True)
+
+    print("***Extracting training features***")
+    print("Train data samples:", X.shape[0])
+    x_train, y_train = extract_features(data=(X, y),
+                                        sample_count=len(X),
+                                        input_size=input_size,
+                                        datagen=train_generator,
+                                        feature_extractor=feature_extractor,
+                                        batch_size=batch_size)
+    print("***Extracting testing features***")
+    print("Test data samples:", X.shape[0])
+    x_test, y_test = extract_features(data=(X, y),
+                                        sample_count=len(X),
+                                        input_size=input_size,
+                                        datagen=test_generator,
+                                        feature_extractor=feature_extractor,
+                                        batch_size=batch_size)
+
+    # 1. Randomly partition X in to v TestingSets of N/v images each
+    x_train_partitions = np.array_split(x_train, v)
+    y_train_partitions = np.array_split(y_train, v)
+    x_test_partitions = np.array_split(x_test, v)
+    y_test_partitions = np.array_split(y_test, v)
+
+    results = []
+
+    # 2. For i = 1 to v
+    for i in range(1, v):
+        print("Fold " + str(i) + '/' + str(v-1))
+
+    #   Let LearningSet = X – TestingSet_i
+        x_train = np.concatenate([x_train_partitions[j] for j in range(v) if j != i])
+        y_train = np.concatenate([y_train_partitions[j] for j in range(v) if j != i])
+        x_test = x_test_partitions[i]
+        y_test = y_test_partitions[i]
+
+    #   Let ValidationSet = 0.2*|LearningSet| images selected at random from LearningSet
+    #   TrainingSet = LearningSet – ValidationSet
+        x_train, x_val, y_train, y_val = train_test_split(x_train, y_train, test_size=0.2, random_state=42)
+
+    #   Train model using TrainingSet and ValidationSet
+        model = make_model(input_size)
+        print("****Training****")
+        model.fit(x_train, y_train, batch_size=batch_size, epochs=100, 
+                    validation_data=(x_val, y_val), verbose=0)
+
+    #   Test model on TestingSet_i, retain accuracy_i
+        results.append(model.evaluate(x_test, y_test, verbose=0)[1])
+
+    # 3. Report mean and variance over accuracy_i
+    mean_accuracy = np.mean(results)
+    variance = np.var(results)
+    print("Mean accuracy:", mean_accuracy)
+    print("Variance:", variance)
+
+    
 
 if __name__ == "__main__":
 
@@ -177,3 +225,4 @@ if __name__ == "__main__":
     
     extracted_data = experiment_1(X, y, output_size, feature_extractor, batch_size)
     experiment_2(extracted_data, batch_size, output_size)
+    experiment_3(X, y, output_size, feature_extractor, batch_size)
