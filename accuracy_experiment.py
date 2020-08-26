@@ -44,9 +44,8 @@ def get_data(data_dir):
     
     diseased_images = [Image.open(diseased_dir + im_path).resize((512,512)) for im_path in os.listdir(diseased_dir)]
     non_diseased_images = [Image.open(non_diseased_dir + im_path).resize((512,512)) for im_path in os.listdir(non_diseased_dir)]
-    # normalize pixel values with 1/255
-    diseased_images = np.array([np.asarray(i) / 1. for i in diseased_images])
-    non_diseased_images = np.array([np.asarray(i) / 1. for i in non_diseased_images])
+    diseased_images = np.array([np.asarray(i) for i in diseased_images])
+    non_diseased_images = np.array([np.asarray(i) for i in non_diseased_images])
 
     print("\nDiseased image folder shape:", diseased_images.shape)
     print("Non_diseased image folder shape:", non_diseased_images.shape)
@@ -128,7 +127,7 @@ def experiment_1(X, y, input_size, feature_extractor, batch_size):
     return ((x_train, y_train), (x_val, y_val), (x_test, y_test))
 
 
-def experiment_2(data, batch_size, input_size, experiment_count=10):
+def experiment_2(data, input_size, batch_size, experiment_count=10):
     
     print('\n-------------------\n    Experiment 2\n-------------------')
 
@@ -145,11 +144,11 @@ def experiment_2(data, batch_size, input_size, experiment_count=10):
     
     mean_accuracy = np.mean(results)
     variance = np.var(results)
-    print("Mean accuracy:", mean_accuracy)
+    print("Mean test accuracy:", mean_accuracy)
     print("Variance:", variance)
 
     
-def experiment_3(X, y, input_size, feature_extractor, batch_size, v=10): # (fairly slow, processing time increases linearly with v)
+def experiment_3(X, y, input_size, feature_extractor, batch_size, v=10): 
 
     print('\n-------------------\n    Experiment 3\n-------------------')
 
@@ -197,7 +196,6 @@ def experiment_3(X, y, input_size, feature_extractor, batch_size, v=10): # (fair
 
     #   Train model using TrainingSet and ValidationSet
         model = make_model(input_size)
-        print("****Training****")
         model.fit(x_train, y_train, batch_size=batch_size, epochs=100, 
                     validation_data=(x_val, y_val), verbose=0)
 
@@ -207,7 +205,7 @@ def experiment_3(X, y, input_size, feature_extractor, batch_size, v=10): # (fair
     # 3. Report mean and variance over accuracy_i
     mean_accuracy = np.mean(results)
     variance = np.var(results)
-    print("Mean accuracy:", mean_accuracy)
+    print("Mean test accuracy:", mean_accuracy)
     print("Variance:", variance)
 
     
@@ -224,5 +222,5 @@ if __name__ == "__main__":
     model = make_model(output_size)
     
     extracted_data = experiment_1(X, y, output_size, feature_extractor, batch_size)
-    experiment_2(extracted_data, batch_size, output_size)
+    experiment_2(extracted_data, output_size, batch_size)
     experiment_3(X, y, output_size, feature_extractor, batch_size)
