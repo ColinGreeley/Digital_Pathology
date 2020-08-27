@@ -5,22 +5,22 @@ from sklearn.model_selection import train_test_split
 from sklearn.utils import shuffle
 import numpy as np
 from PIL import Image
+import matplotlib.pyplot as plt
 import os
 
 
-def make_feature_extractor():
+def make_model():
     conv_base = InceptionResNetV2(weights='imagenet', 
                                 include_top=False, 
                                 input_shape=(512, 512, 3))
-    output = layers.GlobalAveragePooling2D()(conv_base.output)
-    return Model(conv_base.input, output), output.shape[-1]
-
-def make_model(input_size):
-    model = models.Sequential()
-    model.add(layers.Dropout(0.3, input_shape=(input_size,)))
-    model.add(layers.Dense(256, activation='relu'))
-    model.add(layers.Dropout(0.2))
-    model.add(layers.Dense(2, activation='softmax'))
+    for layer in conv_base.layers:
+        layer.trainable = False
+    net = layers.GlobalAveragePooling2D()(conv_base.output)
+    net = layers.Dropout(0.3)(net)
+    net = layers.Dense(256, activation='relu')(net)
+    net = layers.Dropout(0.2)(net)
+    output = layers.Dense(2, activation='softmax')(net)
+    model = Model(conv_base.input, output)
 
     #model.summary()
     model.compile(optimizer='rmsprop', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
@@ -29,13 +29,13 @@ def make_model(input_size):
 def make_data_generator(test=False):
     if test:
         generator = tf.keras.preprocessing.image.ImageDataGenerator(
-                    rescale=1./255)
-                    #rotation_range=30, 
-                    #zoom_range=0.1,
-                    #width_shift_range=0.2,
-                    #height_shift_range=0.2,
-                    #horizontal_flip=True,
-                    #vertical_flip=True)
+                    rescale=1./255,
+                    rotation_range=20, 
+                    zoom_range=0.1,
+                    width_shift_range=0.2,
+                    height_shift_range=0.2,
+                    horizontal_flip=True,
+                    vertical_flip=True)
     else:
         generator = tf.keras.preprocessing.image.ImageDataGenerator(
                     rescale=1./255)
@@ -61,22 +61,8 @@ def get_data(data_dir):
     data, labels = shuffle(data, labels)
     return data, labels
 
-def extract_features(data, sample_count, input_size, datagen, feature_extractor, batch_size):
-    features = np.zeros(shape=(sample_count, input_size), dtype=np.float32)
-    labels = np.zeros(shape=(sample_count), dtype=np.float32)
-    generator = datagen.flow(data[0], data[1], batch_size=batch_size)
-    i = 0
-    for inputs_batch, labels_batch in generator:
-        features_batch = feature_extractor.predict(inputs_batch)
-        features[i * batch_size : (i + 1) * batch_size] = features_batch
-        labels[i * batch_size : (i + 1) * batch_size] = labels_batch
-        i += 1
-        if i * batch_size >= sample_count:
-            break
-    return np.reshape(features, (sample_count, input_size)), labels
 
-
-def experiment_1(X, y, input_size, feature_extractor, batch_size):
+def experiment_1(X, y, batch_size):
 
     print('\n-------------------\n    Experiment 1\n-------------------')
     
@@ -91,59 +77,46 @@ def experiment_1(X, y, input_size, feature_extractor, batch_size):
     # 4. TrainingSet = LearningSet – ValidationSet
     x_train, x_val, y_train, y_val = train_test_split(x_train, y_train, test_size=0.2, random_state=42)
     
-    print("***Extracting training features***")
-    print("Train data samples:", x_train.shape[0])
-    x_train, y_train = extract_features(data=(x_train, y_train),
-                                        sample_count=len(x_train),
-                                        input_size=input_size,
-                                        datagen=train_generator,
-                                        feature_extractor=feature_extractor,
-                                        batch_size=batch_size)
-    print("***Extracting validation features***")
-    print("Validation data samples:", x_val.shape[0])
-    x_val, y_val = extract_features(data=(x_val, y_val),
-                                        sample_count=len(x_val),
-                                        input_size=input_size,
-                                        datagen=test_generator,
-                                        feature_extractor=feature_extractor,
-                                        batch_size=batch_size)
-    print("***Extracting testing features***")
-    print("Test data samples:", x_test.shape[0])
-    x_test, y_test = extract_features(data=(x_test, y_test),
-                                        sample_count=len(x_test),
-                                        input_size=input_size,
-                                        datagen=test_generator,
-                                        feature_extractor=feature_extractor,
-                                        batch_size=batch_size)
-
     # 5. Train model using TrainingSet and ValidationSet
-    model = make_model(input_size)
+    model = make_model()
     print("\n****Training****")
-    model.fit(x_train, y_train, batch_size=batch_size, epochs=100, 
-                validation_data=(x_val, y_val), verbose=0)
+    model.fit(train_generator.flow(x_train, y_train, batch_size=batch_size), 
+                validation_data=test_generator.flow(x_val, y_val, batch_size=batch_size),  
+                steps_per_epoch=len(x_train)/batch_size, validation_steps=len(x_val)/batch_size,
+                epochs=200, verbose=1)
     
     # 6. Test model on TestingSet, report accuracy
-    result = model.evaluate(x_test, y_test, verbose=0)
+    result = model.evaluate(test_generator.flow(x_test, y_test, batch_size=batch_size), 
+                            steps=len(x_test)/batch_size, verbose=0)
     print("Testing loss:", result[0])
     print("Testing accuracy:", result[1])
 
     return ((x_train, y_train), (x_val, y_val), (x_test, y_test))
 
 
-def experiment_2(data, input_size, batch_size, experiment_count=10):
+def experiment_2(X, y, batch_size, experiment_count=10):
     
     print('\n-------------------\n    Experiment 2\n-------------------')
 
     # Repeat Experiment 1 multiple times and report mean accuracy and variance
-    (x_train, y_train), (x_val, y_val), (x_test, y_test) = data
+    train_generator = make_data_generator()
+    test_generator = make_data_generator(test=True)
+
+    x_train, x_test, y_train, y_test = train_test_split(X, y, train_size=0.8, random_state=42)
+    x_train, x_val, y_train, y_val = train_test_split(x_train, y_train, test_size=0.2, random_state=42)
     results = list()
 
     for i in range(experiment_count):
         print("Run " + str(i+1) + '/' + str(experiment_count))
-        model = make_model(input_size)
-        model.fit(x_train, y_train, batch_size=batch_size, epochs=100, 
-                    validation_data=(x_val, y_val), verbose=0)
-        results.append(model.evaluate(x_test, y_test, verbose=0)[1])
+        model = make_model()
+        model.fit(train_generator.flow(x_train, y_train, batch_size=batch_size), 
+                    validation_data=test_generator.flow(x_val, y_val, batch_size=batch_size),  
+                    steps_per_epoch=len(x_train)/batch_size, validation_steps=len(x_val)/batch_size,
+                    epochs=200, verbose=0)
+    
+        result = model.evaluate(test_generator.flow(x_test, y_test, batch_size=batch_size), 
+                                steps=len(x_test)/batch_size, verbose=0)
+        results.append(result[1])
     
     mean_accuracy = np.mean(results)
     variance = np.var(results)
@@ -151,35 +124,16 @@ def experiment_2(data, input_size, batch_size, experiment_count=10):
     print("Variance:", variance)
 
     
-def experiment_3(X, y, input_size, feature_extractor, batch_size, v=10): 
+def experiment_3(X, y, batch_size, v=10): 
 
     print('\n-------------------\n    Experiment 3\n-------------------')
 
     train_generator = make_data_generator()
     test_generator = make_data_generator(test=True)
 
-    print("***Extracting training features***")
-    print("Train data samples:", X.shape[0])
-    x_train, y_train = extract_features(data=(X, y),
-                                        sample_count=len(X),
-                                        input_size=input_size,
-                                        datagen=train_generator,
-                                        feature_extractor=feature_extractor,
-                                        batch_size=batch_size)
-    print("***Extracting testing features***")
-    print("Test data samples:", X.shape[0])
-    x_test, y_test = extract_features(data=(X, y),
-                                        sample_count=len(X),
-                                        input_size=input_size,
-                                        datagen=test_generator,
-                                        feature_extractor=feature_extractor,
-                                        batch_size=batch_size)
-
     # 1. Randomly partition X in to v TestingSets of N/v images each
-    x_train_partitions = np.array_split(x_train, v)
-    y_train_partitions = np.array_split(y_train, v)
-    x_test_partitions = np.array_split(x_test, v)
-    y_test_partitions = np.array_split(y_test, v)
+    x_partitions = np.array_split(X, v)
+    y_partitions = np.array_split(y, v)
 
     results = []
 
@@ -188,22 +142,26 @@ def experiment_3(X, y, input_size, feature_extractor, batch_size, v=10):
         print("Fold " + str(i) + '/' + str(v-1))
 
     #   Let LearningSet = X – TestingSet_i
-        x_train = np.concatenate([x_train_partitions[j] for j in range(v) if j != i])
-        y_train = np.concatenate([y_train_partitions[j] for j in range(v) if j != i])
-        x_test = x_test_partitions[i]
-        y_test = y_test_partitions[i]
+        x_train = np.concatenate([x_partitions[j] for j in range(v) if j != i])
+        y_train = np.concatenate([y_partitions[j] for j in range(v) if j != i])
+        x_test = x_partitions[i]
+        y_test = y_partitions[i]
 
     #   Let ValidationSet = 0.2*|LearningSet| images selected at random from LearningSet
     #   TrainingSet = LearningSet – ValidationSet
         x_train, x_val, y_train, y_val = train_test_split(x_train, y_train, test_size=0.2, random_state=42)
 
     #   Train model using TrainingSet and ValidationSet
-        model = make_model(input_size)
-        model.fit(x_train, y_train, batch_size=batch_size, epochs=100, 
-                    validation_data=(x_val, y_val), verbose=0)
+        model = make_model()
+        model.fit(train_generator.flow(x_train, y_train, batch_size=batch_size), 
+                    validation_data=test_generator.flow(x_val, y_val, batch_size=batch_size),  
+                    steps_per_epoch=len(x_train)/batch_size, validation_steps=len(x_val)/batch_size,
+                    epochs=200, verbose=0)
 
     #   Test model on TestingSet_i, retain accuracy_i
-        results.append(model.evaluate(x_test, y_test, verbose=0)[1])
+        result = model.evaluate(test_generator.flow(x_test, y_test, batch_size=batch_size), 
+                                steps=len(x_test)/batch_size, verbose=0)
+        results.append(result[1])
 
     # 3. Report mean and variance over accuracy_i
     mean_accuracy = np.mean(results)
@@ -216,14 +174,10 @@ def experiment_3(X, y, input_size, feature_extractor, batch_size, v=10):
 if __name__ == "__main__":
 
     data_dir = '../data/randomtiles/randomtiles/'
-    batch_size = 32
-    picture_count = (len(os.listdir(data_dir + 'diseased/')) + 
-                    len(os.listdir(data_dir + 'non_diseased/')))
+    batch_size = 64
     
-    feature_extractor, output_size = make_feature_extractor()
     X, y = get_data(data_dir)
-    model = make_model(output_size)
     
-    extracted_data = experiment_1(X, y, output_size, feature_extractor, batch_size)
-    experiment_2(extracted_data, output_size, batch_size)
-    experiment_3(X, y, output_size, feature_extractor, batch_size)
+    experiment_1(X, y, batch_size)
+    experiment_2(X, y, batch_size)
+    experiment_3(X, y, batch_size)
