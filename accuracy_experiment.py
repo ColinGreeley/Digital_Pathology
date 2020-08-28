@@ -17,9 +17,8 @@ def make_feature_extractor():
 
 def make_model(input_size):
     model = models.Sequential()
-    model.add(layers.Dropout(0.5, input_shape=(input_size,)))
-    model.add(layers.Dense(512, activation='relu'))
-    model.add(layers.Dropout(0.3, input_shape=(input_size,)))
+    model.add(layers.Dense(128, activation='relu', input_shape=(input_size,)))
+    model.add(layers.Dropout(0.3))
     model.add(layers.Dense(2, activation='softmax'))
 
     #model.summary()
@@ -69,7 +68,7 @@ def experiment_1(X, y, input_size, batch_size, verbose=1):
     
     # 5. Train model using TrainingSet and ValidationSet
     model = make_model(input_size)
-    model.fit(x_train, y_train, batch_size=batch_size, epochs=200, validation_data=(x_val, y_val), verbose=1)
+    model.fit(x_train, y_train, batch_size=batch_size, epochs=300, validation_data=(x_val, y_val), verbose=0)
     
     # 6. Test model on TestingSet, report accuracy
     result = model.evaluate(x_test, y_test, verbose=0)
@@ -96,8 +95,8 @@ def experiment_2(X, y, input_size, batch_size, experiment_count=10):
     print("Mean test accuracy:", mean_accuracy)
     print("Variance:", variance)
 
-    
-def experiment_3(X, y, input_size, batch_size, v=20): 
+
+def experiment_3(X, y, input_size, batch_size, v=10): 
 
     print('\n-------------------\n    Experiment 3\n-------------------')
     
@@ -109,8 +108,8 @@ def experiment_3(X, y, input_size, batch_size, v=20):
     y_partitions = np.array_split(y, v)
 
     # 2. For i = 1 to v
-    for i in range(1, v):
-        print("Fold " + str(i) + '/' + str(v-1))
+    for i in range(0, v):
+        print("Fold " + str(i+1) + '/' + str(v))
 
     #   Let LearningSet = X – TestingSet_i
         x_train = np.concatenate([x_partitions[j] for j in range(v) if j != i])
