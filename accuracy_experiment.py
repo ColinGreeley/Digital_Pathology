@@ -5,35 +5,25 @@ from sklearn.model_selection import train_test_split
 from sklearn.utils import shuffle
 import numpy as np
 from PIL import Image
-import matplotlib.pyplot as plt
 import os
 
 
-def make_model():
+def make_feature_extractor():
     conv_base = InceptionResNetV2(weights='imagenet', 
                                 include_top=False, 
                                 input_shape=(512, 512, 3))
-    for layer in conv_base.layers:
-        layer.trainable = False
-    net = layers.GlobalAveragePooling2D()(conv_base.output)
-    net = layers.Dense(128, activation='relu')(net)
-    net = layers.Dropout(0.3)(net)
-    output = layers.Dense(2, activation='softmax')(net)
-    model = Model(conv_base.input, output)
+    output = layers.GlobalAveragePooling2D()(conv_base.output)
+    return Model(conv_base.input, output), output.shape[-1]
+
+def make_model(input_size):
+    model = models.Sequential()
+    model.add(layers.Dense(128, activation='relu', input_shape=(input_size,)))
+    model.add(layers.Dropout(0.3))
+    model.add(layers.Dense(2, activation='softmax'))
 
     #model.summary()
     model.compile(optimizer='rmsprop', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
     return model
-
-def make_data_generator():
-    generator = tf.keras.preprocessing.image.ImageDataGenerator(
-                rotation_range=20, 
-                zoom_range=0.1,
-                width_shift_range=0.2,
-                height_shift_range=0.2,
-                horizontal_flip=True,
-                vertical_flip=True)
-    return generator
 
 def get_data(data_dir):
     diseased_dir = data_dir + 'diseased/'
@@ -41,6 +31,7 @@ def get_data(data_dir):
     
     diseased_images = [Image.open(diseased_dir + im_path).resize((512,512)) for im_path in os.listdir(diseased_dir)]
     non_diseased_images = [Image.open(non_diseased_dir + im_path).resize((512,512)) for im_path in os.listdir(non_diseased_dir)]
+    # rescale RGB values from 0-255 to 0-1
     diseased_images = np.array([np.asarray(i) / 255. for i in diseased_images])
     non_diseased_images = np.array([np.asarray(i) / 255. for i in non_diseased_images])
 
@@ -55,14 +46,17 @@ def get_data(data_dir):
     data, labels = shuffle(data, labels)
     return data, labels
 
+def extract_features(X, y, feature_extractor):
+    features = feature_extractor.predict(X)
+    return features, y
 
-def experiment_1(X, y, batch_size, verbose=1):
+
+def experiment_1(X, y, input_size, batch_size, verbose=1):
 
     if verbose == 1:
         print('\n-------------------\n    Experiment 1\n-------------------')
-    
+
     X, y = shuffle(X, y)
-    train_generator = make_data_generator()
 
     # 1. Let LearningSet = 0.8*N images selected at random from X
     # 2. Let TestingSet = X – LearningSet
@@ -73,13 +67,11 @@ def experiment_1(X, y, batch_size, verbose=1):
     x_train, x_val, y_train, y_val = train_test_split(x_train, y_train, test_size=0.2)
     
     # 5. Train model using TrainingSet and ValidationSet
-    model = make_model()
-    model.fit(train_generator.flow(x_train, y_train, batch_size=batch_size), 
-                steps_per_epoch=len(x_train)/batch_size,
-                validation_data=(x_val, y_val), epochs=300, verbose=1)
+    model = make_model(input_size)
+    model.fit(x_train, y_train, batch_size=batch_size, epochs=300, validation_data=(x_val, y_val), verbose=0)
     
     # 6. Test model on TestingSet, report accuracy
-    result = model.evaluate(x_test, y_test, batch_size=batch_size, verbose=0)
+    result = model.evaluate(x_test, y_test, verbose=0)
     if verbose == 1:
         print("Testing loss:", result[0])
         print("Testing accuracy:", result[1])
@@ -87,7 +79,7 @@ def experiment_1(X, y, batch_size, verbose=1):
     return result[1]
 
 
-def experiment_2(X, y, batch_size, experiment_count=10):
+def experiment_2(X, y, input_size, batch_size, experiment_count=10):
     
     print('\n-------------------\n    Experiment 2\n-------------------')
 
@@ -103,22 +95,21 @@ def experiment_2(X, y, batch_size, experiment_count=10):
     print("Mean test accuracy:", mean_accuracy)
     print("Variance:", variance)
 
-    
-def experiment_3(X, y, batch_size, v=10): 
+
+def experiment_3(X, y, input_size, batch_size, v=10): 
 
     print('\n-------------------\n    Experiment 3\n-------------------')
-
-    train_generator = make_data_generator()
+    
+    X, y = shuffle(X, y)
+    results = []
 
     # 1. Randomly partition X in to v TestingSets of N/v images each
     x_partitions = np.array_split(X, v)
     y_partitions = np.array_split(y, v)
 
-    results = []
-
     # 2. For i = 1 to v
-    for i in range(1, v):
-        print("Fold " + str(i) + '/' + str(v-1))
+    for i in range(0, v):
+        print("Fold " + str(i+1) + '/' + str(v))
 
     #   Let LearningSet = X – TestingSet_i
         x_train = np.concatenate([x_partitions[j] for j in range(v) if j != i])
@@ -128,17 +119,14 @@ def experiment_3(X, y, batch_size, v=10):
 
     #   Let ValidationSet = 0.2*|LearningSet| images selected at random from LearningSet
     #   TrainingSet = LearningSet – ValidationSet
-        x_train, x_val, y_train, y_val = train_test_split(x_train, y_train, test_size=0.2, random_state=42)
+        x_train, x_val, y_train, y_val = train_test_split(x_train, y_train, test_size=0.2)
 
     #   Train model using TrainingSet and ValidationSet
-        model = make_model()
-        model.fit(train_generator.flow(x_train, y_train, batch_size=batch_size), 
-                    steps_per_epoch=len(x_train)/batch_size, 
-                    validation_data=(x_val, y_val), epochs=300, verbose=0)
+        model = make_model(input_size)
+        model.fit(x_train, y_train, batch_size=batch_size, epochs=300, validation_data=(x_val, y_val), verbose=0)
 
     #   Test model on TestingSet_i, retain accuracy_i
-        result = model.evaluate(x_test, y_test, batch_size=batch_size, verbose=0)
-        results.append(result[1])
+        results.append(model.evaluate(x_test, y_test, verbose=0)[1])
 
     # 3. Report mean and variance over accuracy_i
     mean_accuracy = np.mean(results)
@@ -153,8 +141,10 @@ if __name__ == "__main__":
     data_dir = '../data/randomtiles/randomtiles/'
     batch_size = 32
     
+    feature_extractor, output_size = make_feature_extractor()
     X, y = get_data(data_dir)
+    X, y = extract_features(X, y, feature_extractor)
     
-    experiment_1(X, y, batch_size)
-    experiment_2(X, y, batch_size)
-    experiment_3(X, y, batch_size)
+    experiment_1(X, y, output_size, batch_size)
+    experiment_2(X, y, output_size, batch_size)
+    experiment_3(X, y, output_size, batch_size)
