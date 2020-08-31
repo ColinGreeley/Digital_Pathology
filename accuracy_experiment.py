@@ -3,15 +3,18 @@ from tensorflow.keras.applications import InceptionResNetV2
 from tensorflow.keras import layers, models, Model
 from sklearn.model_selection import train_test_split
 from sklearn.utils import shuffle
+from sklearn.metrics import confusion_matrix
 import numpy as np
 from PIL import Image
 import os
 
 
+image_rez = 256 #512
+
 def make_feature_extractor():
     conv_base = InceptionResNetV2(weights='imagenet', 
                                 include_top=False, 
-                                input_shape=(512, 512, 3))
+                                input_shape=(image_rez, image_rez, 3))
     output = layers.GlobalAveragePooling2D()(conv_base.output)
     return Model(conv_base.input, output), output.shape[-1]
 
@@ -29,8 +32,8 @@ def get_data(data_dir):
     diseased_dir = data_dir + 'diseased/'
     non_diseased_dir = data_dir + 'non_diseased/'
     
-    diseased_images = [Image.open(diseased_dir + im_path).resize((512,512)) for im_path in os.listdir(diseased_dir)]
-    non_diseased_images = [Image.open(non_diseased_dir + im_path).resize((512,512)) for im_path in os.listdir(non_diseased_dir)]
+    diseased_images = [Image.open(diseased_dir + im_path).resize((image_rez,image_rez)) for im_path in os.listdir(diseased_dir)]
+    non_diseased_images = [Image.open(non_diseased_dir + im_path).resize((image_rez,image_rez)) for im_path in os.listdir(non_diseased_dir)]
     # rescale RGB values from 0-255 to 0-1
     diseased_images = np.array([np.asarray(i) / 255. for i in diseased_images])
     non_diseased_images = np.array([np.asarray(i) / 255. for i in non_diseased_images])
@@ -72,9 +75,11 @@ def experiment_1(X, y, input_size, batch_size, verbose=1):
     
     # 6. Test model on TestingSet, report accuracy
     result = model.evaluate(x_test, y_test, verbose=0)
+    cm = confusion_matrix(y_test, np.argmax(model.predict(x_test), axis=-1))
     if verbose == 1:
         print("Testing loss:", result[0])
         print("Testing accuracy:", result[1])
+        print("confusion matrix:\n", cm)
 
     return result[1]
 
@@ -138,7 +143,7 @@ def experiment_3(X, y, input_size, batch_size, v=10):
 
 if __name__ == "__main__":
 
-    data_dir = '../data/randomtiles/randomtiles/'
+    data_dir = '../data/randomtiles256/randomtiles256/'
     batch_size = 32
     
     feature_extractor, output_size = make_feature_extractor()
