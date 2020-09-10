@@ -9,9 +9,11 @@ from tensorflow.keras.applications.resnet import preprocess_input
 from tensorflow.keras.preprocessing.image import img_to_array
 from tensorflow.keras.applications import imagenet_utils
 from tensorflow.keras import models, layers
+import tensorflow.keras.backend as K
 from imutils.object_detection import non_max_suppression
 from collections import namedtuple
 import numpy as np
+from sklearn.utils import shuffle
 import argparse
 import imutils
 import time
@@ -27,7 +29,7 @@ def get_args():
     ap.add_argument("-i", "--image", required=False, help="path to the input images")
     ap.add_argument("-s", "--size", type=str, default="(64, 64)", help="ROI size (in pixels)")
     ap.add_argument("-c", "--min-conf", type=float, default=0.9, help="minimum probability to filter weak detections")
-    ap.add_argument("-v", "--visualize", type=int, default=1, help="whether or not to show extra visualizations for debugging")
+    ap.add_argument("-v", "--visualize", type=int, default=-1, help="whether or not to show extra visualizations for debugging")
     args = vars(ap.parse_args())
     return args
 
@@ -44,16 +46,25 @@ def get_data(path):
         with open(annotations_path + an, 'rb') as f:
             annotations.append(xmltodict.parse(f)['annotation']['object'])
 
-    return (images, annotations)
+    labels = []
+    bounding_boxes = []
+    for annotation in annotations:
+        for cell in annotation:
+            labels.append(cell['name'])
+            bb = [cell['bndbox'][key] for key in cell['bndbox'].keys()]
+            bounding_boxes.append(bb)
+    bounding_boxes = np.array(bounding_boxes, dtype='int32')
+
+    return (images, bounding_boxes, labels)
 
 
 class RCNN:
 
     def __init__(self, args):
         self.WIDTH = 600
-        self.PYR_SCALE = 1.2    # default: 1.5
+        self.PYR_SCALE = 1.5    # default: 1.5
         self.MIN_SIZE = (2000, 2000)
-        self.ROI_SIZE = (256, 256)
+        self.ROI_SIZE = (224, 224)
         self.WIN_STEP = int(self.ROI_SIZE[0] / 4)
         self.INPUT_SIZE = eval(args["size"])
         self.make_RPN()
@@ -64,6 +75,10 @@ class RCNN:
             for x in range(0, image.shape[1] - ws[0], step):
                 # yield the current window
                 yield (x, y, image[y:y + ws[1], x:x + ws[0]])
+                if y + ws[1]*2 < image.shape[0]:
+                    yield (x, y, image[y:y + ws[1]*2, x:x + ws[0]])
+                if x + ws[0]*2 < image.shape[1]:
+                    yield (x, y, image[y:y + ws[1], x:x + ws[0]*2])
 
     def image_pyramid(self, image, scale, minSize):
         # yield the original image
@@ -100,35 +115,58 @@ class RCNN:
         # return the intersection over union value
         return iou
 
+    def max_IoU_search(self, predicted_box, true_boxes):
+        IoUs = []
+        for i in range(len(true_boxes)):
+            IoUs.append(self.bb_intersection_over_union(predicted_box, true_boxes[i]))
+        return (np.max(IoUs), np.argmax(IoUs))
+
+    def accuracy(self, y_true, y_pred):
+        return K.mean(K.equal(K.round(y_true), K.round(y_pred)))
+
+    def conv_node(self, inputs, filters, kernel_size):
+        conv_1 = layers.Conv2D(filters, 1, activation='relu')(inputs)
+        conv_2 = layers.SeparableConvolution2D(filters, kernel_size=kernel_size, activation='relu')(conv_1)
+        norm_1 = layers.BatchNormalization()(conv_2)
+        pool_1 = layers.MaxPooling2D()(norm_1)
+        return pool_1
+
     def make_RPN(self):  # region proposal network
         input_layer = layers.Input(shape=(*self.INPUT_SIZE, 3))
-        conv_1 = layers.Conv2D(16, 3, (2,2), activation='relu')(input_layer)
 
-        conv_a1 = layers.Conv2D(32, 1, activation='relu')(conv_1)
-        conv_b1 = layers.Conv2D(32, 1, activation='relu')(conv_1)
-        conv_b2 = layers.Conv2D(32, 3, activation='relu', padding='same')(conv_b1)
-        conv_c1 = layers.Conv2D(32, 1, activation='relu')(conv_1)
-        conv_c2 = layers.Conv2D(32, 5, activation='relu', padding='same')(conv_c1)
+        l1 = self.conv_node(input_layer, 32, 5)
+        l2 = self.conv_node(l1, 64, 3)
+        l3 = self.conv_node(l2, 64, 3)
+        l4 = self.conv_node(l3, 128, 3)
 
-        concat_1 = layers.Concatenate()([conv_a1, conv_b2, conv_c2])
-        pool_1 = layers.MaxPooling2D((2,2))(concat_1)
-        conv_2 = layers.Conv2D(256, 3, activation='relu')(pool_1)
-        pool_2 = layers.MaxPooling2D((2,2))(conv_2)
-        conv_3 = layers.Conv2D(512, 3, activation='relu')(pool_2)
-        pool_3 = layers.GlobalAveragePooling2D()(conv_3)
-
-        #dense_input = layers.Flatten()(pool_3)
-        droput_1 = layers.Dropout(0.2)(pool_3)
-        output_layer = layers.Dense(1, activation='sigmoid')(droput_1)
+        flat = layers.Flatten()(l4)
+        dropout = layers.Dropout(0.2)(flat)
+        output_layer = layers.Dense(1, activation='sigmoid')(dropout)
 
         model = models.Model(input_layer, output_layer)
-        model.compile(optimizer='rmsprop', loss='mse')
-        #model.summary()
+        model.compile(optimizer='rmsprop', loss='mse', metrics=[self.accuracy])
+        model.summary()
         self.RPN = model
 
-    def train_RPN(self):
-        pass
+    def train_RPN(self, rois, predicted_boxes, true_boxes):
+        IoUs = []
+        labels = []
+        print("\n[INFO] finding max IoU for each RoI")
+        start = time.time()
+        for i in range(len(predicted_boxes)):
+            IoU, label = self.max_IoU_search(predicted_boxes[i], bounding_boxes)
+            IoUs.append(IoU)
+            labels.append(label)
+        end = time.time()
+        print("[INFO] searching for max IoUs took {:.5f} seconds".format(end - start))
+        print("\n***** Training *****")
 
+        # normalize RoI pixel values
+        rois /= 255.
+        IoUs = np.array(IoUs, dtype="float32")
+        rois, IoUs = shuffle(rois, IoUs)
+        self.RPN.fit(rois, IoUs, epochs=100, shuffle=True)
+        
     def get_rois(self, orig):
         #(orig_H, orig_W) = orig.shape[:2]
         #orig = imutils.resize(orig, width=rcnn.WIDTH)
@@ -144,6 +182,7 @@ class RCNN:
         locs = []
         # time how long it takes to loop over the image pyramid layers and
         # sliding window locations
+        print("\n[INFO] extracting RoIs from image pyramid")
         start = time.time()
         
         # loop over the image pyramid
@@ -158,8 +197,8 @@ class RCNN:
                 # *original* image dimensions
                 x = int(x * scale)
                 y = int(y * scale)
-                w = int(self.ROI_SIZE[0] * scale)
-                h = int(self.ROI_SIZE[1] * scale)
+                w = int(roiOrig.shape[1] * scale)
+                h = int(roiOrig.shape[0] * scale)
                 # take the ROI and preprocess it so we can later classify
                 # the region using Keras/TensorFlow
                 roi = cv2.resize(roiOrig, self.INPUT_SIZE)
@@ -188,7 +227,8 @@ class RCNN:
         print("[INFO] looping over pyramid/windows took {:.5f} seconds".format(end - start))
         # convert the ROIs to a NumPy array
         rois = np.array(rois, dtype="float32")
-        return rois
+        locs = np.array(locs, dtype="int32")
+        return (rois, locs)
 
     def predict(self, rois):
         # classify each of the proposal ROIs using ResNet and then show how
@@ -204,8 +244,9 @@ class RCNN:
         # labels (keys) to any ROIs associated with that label (values)
         #preds = imagenet_utils.decode_predictions(preds, top=1)
         #labels = {}
+        return preds
 
-    def show_pred(self):
+    def show_pred(self, preds):
         # loop over the predictions
         for (i, p) in enumerate(preds):
             # grab the prediction information for the current ROI
@@ -258,10 +299,14 @@ class RCNN:
 if __name__ == "__main__":
     
     args = get_args()
-    images, annotations = get_data('../data/object_detection/') #args["image"])
+    images, bounding_boxes, labels = get_data('../data/object_detection/') #args["image"])
     
     rcnn = RCNN(args)
     model = ResNet50(weights="imagenet", include_top=True)
     
-    rois = rcnn.get_rois(images[0])
-    rcnn.predict(rois)
+    rois, box_predictions = rcnn.get_rois(images[0])
+    print("\nROIs shape:", rois.shape, "\nBouding box predictions:", box_predictions.shape, "\nBounding boxes:", bounding_boxes.shape)
+    
+    rcnn.train_RPN(rois, box_predictions, bounding_boxes)
+    preds = rcnn.predict(rois)
+    #rcnn.show_pred(preds, labels, bounding_boxes)
