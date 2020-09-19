@@ -5,8 +5,8 @@ from tensorflow.keras.applications import InceptionResNetV2
 import sys
 import cv2
 import numpy as np
-from generatetiles import processNonDiseasedImage   # importing modified image generation function
-                                                    # from original file provided by Larry Holder
+# importing modified image generation function from original file provided by Larry Holder
+from generatetiles import processNonDiseasedImage as processImage   
 
 image_rez = 256 
 
@@ -20,18 +20,16 @@ def make_feature_extractor():
 def predict(tiles, locs, model):
     preds = model.predict(tiles)
     # return center locations of diseased tiles
-    return [((locs[i][0]+locs[i][2])/2, (locs[i][1]+locs[i][3])/2)  for i in range(len(preds)) if np.argmax(preds[i]) == 0] 
+    return [locs[i] for i in range(len(preds)) if np.argmax(preds[i]) == 0] 
 
 def highlight_image(image, locs):
     clone = image.copy()
     (orig_H, orig_W) = clone.shape[:2]
-    clone = cv2.resize(clone, (800,1000))
+    clone = cv2.resize(clone, (800,1100))
     (H, W) = clone.shape[:2]
     (Delta_H, Delta_W) = (H / orig_H, W / orig_W)
-    for x, y in locs:
-        #cv2.rectangle(clone, (int(x1*Delta_W), int(y1*Delta_H)), (int(x2*Delta_W), int(y2*Delta_H)), (0, 255, 0), 2)
-        cv2.circle(clone, (int(x*Delta_W),int(y*Delta_H)), 20, (0,255,0), 2)
-        cv2.circle(clone, (int(x*Delta_W),int(y*Delta_H)), 2, (0,0,255), 2)
+    for x1, y1, x2, y2 in locs:
+        cv2.rectangle(clone, (int(x1*Delta_W), int(y1*Delta_H)), (int(x2*Delta_W), int(y2*Delta_H)), (0, 0, 0))
         #clone[int(y1*Delta_H):int(y2*Delta_H), int(x1*Delta_W):int(x2*Delta_W), 0] += 50
     cv2.imshow("Visualization", clone)
     cv2.waitKey(0)
@@ -40,7 +38,7 @@ def highlight_image(image, locs):
 
 if __name__ == "__main__":
     origImageFileName = sys.argv[1]                                     # a. take new image as input
-    tiles, locs, image = processNonDiseasedImage(origImageFileName)     # b. generate tiles
+    tiles, locs, image = processImage(origImageFileName, 256, 256)      # b. generate tiles
     model = load_model('tiles256_model.h5')                             # c. read in trained model
     fe, _ = make_feature_extractor()
     pred_locs = predict(fe.predict(tiles/255.), locs, model)            # d. classify images 

@@ -91,8 +91,7 @@ def processDiseasedImage(imageFileName, dotLocationsFileName):
         y2 += TILE_INCREMENT   
     return tiles             
 
-def processNonDiseasedImage(imageFileName):
-    global TILE_SIZE, TILE_INCREMENT
+def processNonDiseasedImage(imageFileName, TILE_SIZE=256, TILE_INCREMENT=128):
     #fileRoot = os.path.splitext("../Generated_Images/")[0] + "_non_diseased_tile_"
     image = cv2.imread(imageFileName, cv2.IMREAD_COLOR)
     height, width, channels = image.shape
