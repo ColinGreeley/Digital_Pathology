@@ -1,4 +1,5 @@
 
+## Colin Greeley ##
 ## Original code from pyimagesearch ##
 ## https://www.pyimagesearch.com/category/deep-learning/ ##
 ## "Turning any CNN image classifier into an object detector with Keras, Tensorflow, and OpenCV"  ##
@@ -25,12 +26,13 @@ import json
 
 label_map = {'h':0, 'b':1, 'g':2, 'y':3}
 value_map = ['healthy', 'blue', 'green', 'yellow']
+color_map = [(0,0,0), (255,0,0), (0,255,0), (0,255,255)]
 
 def get_args():
     
     ap = argparse.ArgumentParser()
-    ap.add_argument("-i", "--image", type=int, default=0, help="index of test image")
-    ap.add_argument("-t", "--type", type=str, default="test", help='-t "test" or "train"')
+    ap.add_argument("-t", "--type", type=str, required=True, help='-t "test" or "train_all" or "train_rpn" or "train_classifier"')
+    ap.add_argument("-p", "--path", type=str, required=True, help="path to test image (test) or path to dataset (train)")
     ap.add_argument("-s", "--size", type=str, default="(32, 32)", help="ROI size (in pixels)")
     ap.add_argument("-c", "--min-conf", type=float, default=0.7, help="minimum probability to filter weak detections")
     ap.add_argument("-v", "--visualize", type=int, default=-1, help="whether or not to show extra visualizations for debugging")
@@ -65,17 +67,16 @@ def get_data(path):
     return (images, bb_array, labels_array)
 
 
-class RCNN:
+class RPN:
 
-    def __init__(self, args):
+    def __init__(self):
         self.WIDTH = 1000
         self.PYR_SCALE = 1.3    # default: 1.5
         self.MIN_SIZE = (300, 300)
         self.ROI_SIZE = (32, 32)
         self.WIN_STEP = int(self.ROI_SIZE[0] / 4)
         self.INPUT_SIZE = (256, 256)
-        self.make_RPN()
-        self.make_classifier()
+        self.make_model()
 
     def sliding_window(self, image, step, ws):
         # slide a window across the image
@@ -150,7 +151,7 @@ class RCNN:
 
     def get_rois(self, orig):
         (orig_H, orig_W) = orig.shape[:2]
-        orig = imutils.resize(orig, width=rcnn.WIDTH)
+        orig = imutils.resize(orig, width=self.WIDTH)
         (H, W) = orig.shape[:2]
         (Delta_H, Delta_W) = (orig_H / H, orig_W / W)
 
@@ -226,13 +227,13 @@ class RCNN:
 
     def conv_node(self, inputs, filters, kernel):
         conv_a1 = layers.Conv2D(filters, 1, activation='relu')(inputs)
-        conv_a2 = layers.SeparableConv2D(filters, kernel, padding='same')(conv_a1)
+        conv_a2 = layers.Conv2D(filters, kernel, padding='same')(conv_a1)
         norm_a = layers.BatchNormalization()(conv_a2)
         act_a = layers.Activation('relu')(norm_a)
         pool_a = layers.MaxPooling2D()(act_a)
         return pool_a
 
-    def make_RPN(self):  
+    def make_model(self):  
         # region proposal network
         input_layer = layers.Input(shape=(*self.ROI_SIZE, 3))
 
@@ -250,9 +251,78 @@ class RCNN:
         model = models.Model(input_layer, output_layer)
         model.compile(optimizer='rmsprop', loss='mse', metrics=[self.accuracy])
         #model.summary()
-        self.RPN = model
+        self.model = model
 
-    def make_classifier(self):
+
+    def train(self, rois_array, IoUs_array):
+
+        x = np.append(*rois_array, axis=0)
+        y = np.append(*IoUs_array, axis=0)
+        print("X:", x.shape, " Y:", y.shape)
+
+        # normalize RoI pixel values
+        x /= 255.
+        x, y = shuffle(x, y)
+        self.model.fit(x, y, epochs=50, shuffle=True)
+        self.model.save("RPN.h5")
+
+    def predict(self, rois, box_predictions, labels_array=None, confidence=0.3):
+        print("\n[INFO] Classifying ROIs...")
+        start = time.time()
+        preds = self.model.predict(rois/255.)
+        end = time.time()
+        print("[INFO] Classifying ROIs took {:.5f} seconds".format(end - start))
+        
+        boxes = []
+        probs = []
+        labels = []
+        print("Preds shape:", preds.shape)
+        print("Box predictions shape:", box_predictions.shape)
+        for i in range(len(preds)):
+            if preds[i] >= confidence:
+                #print(preds[i])
+                probs.append(preds[i])
+                boxes.append(box_predictions[i])
+                if labels_array is not None:
+                    labels.append(labels_array[i])
+        return np.array(probs), np.array(boxes), np.array(labels)
+
+    def get_pred_list(self, rois_array, box_predictions_array, training_labels, confidence):
+        probs_array = []
+        boxes_array = []
+        label_array = []
+        for i in range(len(images)):
+            probs, boxes, labels = rcnn.RPN_predict(rois_array[i], box_predictions_array[i], training_labels[i], confidence=confidence)
+            probs_array.append(probs)
+            boxes_array.append(boxes)
+            label_array.append(labels)
+        return probs_array, boxes_array, label_array
+
+    def show_pred(self, image, probs, boxes):
+       
+        orig = image
+        (orig_H, orig_W) = orig.shape[:2]
+        orig = imutils.resize(orig, 1000)
+        (H, W) = orig.shape[:2]
+        (Delta_H, Delta_W) = (orig_H / H, orig_W / W)
+        clone = orig.copy()
+
+        boxes = non_max_suppression(boxes, probs=probs[:,0], overlapThresh=0.3)
+        for box in boxes:
+            (startX, startY, endX, endY) = box
+            cv2.rectangle(clone, (int(startX/Delta_W), int(startY/Delta_H)), (int(endX/Delta_W), int(endY/Delta_H)), (0, 0, 0), 1)
+        cv2.imshow("Before", clone)
+        cv2.waitKey(0)
+        cv2.imwrite('./RPN_Prediction.jpg', clone)
+        return clone
+
+
+class Classifier:
+
+    def __init__(self):
+        self.make_model()
+    
+    def make_model(self):
         conv_base = InceptionResNetV2(weights='imagenet', 
                                 include_top=False, 
                                 input_shape=(299, 299, 3))
@@ -266,32 +336,9 @@ class RCNN:
 
         model = models.Model(conv_base.input, output)
         model.compile(optimizer='rmsprop', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
-        self.classifier = model
+        self.model = model
 
-
-    def train_RPN(self, rois_array, IoUs_array):
-
-        x = np.append(*rois_array, axis=0)
-        y = np.append(*IoUs_array, axis=0)
-        print("X:", x.shape, " Y:", y.shape)
-
-        # normalize RoI pixel values
-        x /= 255.
-        x, y = shuffle(x, y)
-        self.RPN.fit(x, y, epochs=50, shuffle=True)
-
-    def get_RPN_pred_list(self, rois_array, box_predictions_array, training_labels, confidence):
-        probs_array = []
-        boxes_array = []
-        label_array = []
-        for i in range(len(images)):
-            probs, boxes, labels = rcnn.RPN_predict(rois_array[i], box_predictions_array[i], training_labels[i], confidence=confidence)
-            probs_array.append(probs)
-            boxes_array.append(boxes)
-            label_array.append(labels)
-        return probs_array, boxes_array, label_array
-
-    def train_classifier(self, images, ba, la):
+    def train(self, images, ba, la):
 
         boxes_array = ba
         label_array = la
@@ -318,60 +365,21 @@ class RCNN:
         print("[INFO] Training classifier...")
 
         x, y = shuffle(x, y)
-        self.classifier.fit(x, y, epochs=30, shuffle=True)
+        self.model.fit(x, y, epochs=30, shuffle=True)
+        self.model.save("classifier.h5")
 
-    def RPN_predict(self, rois, box_predictions, labels_array=None, confidence=0.3):
-        print("\n[INFO] Classifying ROIs...")
-        start = time.time()
-        preds = self.RPN.predict(rois/255.)
-        end = time.time()
-        print("[INFO] Classifying ROIs took {:.5f} seconds".format(end - start))
-        
-        boxes = []
-        probs = []
-        labels = []
-        print("Preds shape:", preds.shape)
-        print("Box predictions shape:", box_predictions.shape)
-        for i in range(len(preds)):
-            if preds[i] >= confidence:
-                #print(preds[i])
-                probs.append(preds[i])
-                boxes.append(box_predictions[i])
-                if labels_array is not None:
-                    labels.append(labels_array[i])
-        return np.array(probs), np.array(boxes), np.array(labels)
-
-    def classifier_predict(self, image, probs, boxes):
+    def predict(self, image, probs, boxes):
         boxes = non_max_suppression(boxes, probs=probs[:,0], overlapThresh=0.3)
         x = np.array([cv2.resize(image[y1:y2, x1:x2], (299, 299)) / 255. for (x1, y1, x2, y2) in boxes])
         print('\nClassifier prediction input shape:', x.shape)
         print("[INFO] Classifying pathologies...")
         start = time.time()
-        preds = self.classifier.predict(x)
+        preds = self.model.predict(x)
         end = time.time()
         print("[INFO] Classifying pathologies took {:.5f} seconds".format(end - start))
         return preds, boxes
-        
-
-    def show_RPN_pred(self, image, probs, boxes):
-       
-        orig = image
-        (orig_H, orig_W) = orig.shape[:2]
-        orig = imutils.resize(orig, 1000)
-        (H, W) = orig.shape[:2]
-        (Delta_H, Delta_W) = (orig_H / H, orig_W / W)
-        clone = orig.copy()
-
-        boxes = non_max_suppression(boxes, probs=probs[:,0], overlapThresh=0.3)
-        for box in boxes:
-            (startX, startY, endX, endY) = box
-            cv2.rectangle(clone, (int(startX/Delta_W), int(startY/Delta_H)), (int(endX/Delta_W), int(endY/Delta_H)), (0, 0, 0), 1)
-        cv2.imshow("Before", clone)
-        cv2.waitKey(0)
-        cv2.imwrite('./RPN_Prediction.jpg', clone)
-        return clone
-
-    def show_classifier_pred(self, image, preds, boxes, confidence):
+    
+    def show_pred(self, image, preds, boxes, confidence):
         
         orig = image
         (orig_H, orig_W) = orig.shape[:2]
@@ -385,73 +393,96 @@ class RCNN:
         for i in range(len(preds)):
             if preds[i, 1] >= confidence or preds[i, 2] >= confidence or preds[i, 3] >= confidence:
                 diseased_boxes.append(boxes[i])
-                diseased_preds.append(preds[i])
+                diseased_preds.append(preds[i, 1:])
 
         #boxes = non_max_suppression(boxes, probs=preds[:,0], overlapThresh=0.3)
         for box, pred in zip(diseased_boxes, diseased_preds):
             (startX, startY, endX, endY) = box
-            cv2.rectangle(clone, (int(startX/Delta_W), int(startY/Delta_H)), (int(endX/Delta_W), int(endY/Delta_H)), (0, 0, 0), 1)
-            cv2.putText(clone, value_map[np.argmax(pred)] + ': {:.2f}%'.format(max(pred)), (int(startX/Delta_W), int(startY/Delta_H)-10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0,0,0), 1)
+            cv2.rectangle(clone, (int(startX/Delta_W), int(startY/Delta_H)), (int(endX/Delta_W), int(endY/Delta_H)), color_map[np.argmax(pred)+1], 1)
+            cv2.putText(clone, '{:.2f}%'.format(max(pred)), (int(startX/Delta_W), int(startY/Delta_H)-10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0,0,0), 1)
         cv2.imshow("Before", clone)
         cv2.waitKey(0)
         cv2.imwrite('./Classifier_Prediction.jpg', clone)
+  
 
+class RCNN:
 
-def train(rcnn, images, bounding_boxes_array, labels_array):
-    
-    # get rois for all images
-    rois_array, box_predictions_array = rcnn.get_rois_list(images)
-    # get label data
-    IoUs_array, label_nums_array = rcnn.get_label_data(rois_array, box_predictions_array, bounding_boxes_array)
-    # train RPN
-    label_nums_array = rcnn.train_RPN(rois_array, IoUs_array)
-    # map label numbers to classifier labels
-    training_labels = [[label_map[labels_array[i][label_num]] for label_num in label_nums_array[i]] for i in range(len(label_nums_array))]
+    def __init__(self):
+        self.rpn = RPN()
+        self.classifier = Classifier()
 
-    rcnn.RPN = load_model('RPN.h5')
+    def __call__(self, data_path, instruction):
+        if instruction == 'train_all':
+            self.train_all(data_path)
+        if instruction == 'train_rpn':
+            self.train_rpn(data_path)
+        if instruction == 'train_classifier':
+            self.train_classifier(data_path)
+        if instruction == 'test':
+            self.test(data_path)
 
-    # get RPN predictions for classification training
-    probs_array, boxes_array, label_array = rcnn.get_RPN_pred_list(rois_array, box_predictions_array, training_labels, confidence=0.3)
+    def train_all(self, data_path):
+        # get images and respective XML data
+        images, bounding_boxes_array, labels_array = get_data(data_path)
+        # get rois for all images
+        rois_array, box_predictions_array = self.rpn.get_rois_list(images)
+        # get label data
+        IoUs_array, label_nums_array = self.rpn.get_label_data(rois_array, box_predictions_array, bounding_boxes_array)
+        # train RPN
+        self.rpn.train(rois_array, IoUs_array)
+        # map label numbers to classifier labels
+        training_labels = [[label_map[labels_array[i][label_num]] for label_num in label_nums_array[i]] for i in range(len(label_nums_array))]
+        # get RPN predictions for classification training
+        _, boxes_array, label_array = self.rpn.get_pred_list(rois_array, box_predictions_array, training_labels, confidence=0.3)
+        # train the classifier
+        self.classifier.train(images, boxes_array, label_array)
 
-    # train the classifier
-    #rcnn.train_classifier(images, boxes_array, label_array)
-    rcnn.classifier = load_model('classifier.h5')
+    def train_rpn(self, data_path):
+        # get images and respective XML data
+        images, bounding_boxes_array, _ = get_data(data_path)
+        # get rois for all images
+        rois_array, box_predictions_array = self.rpn.get_rois_list(images)
+        # get label data
+        IoUs_array, _ = self.rpn.get_label_data(rois_array, box_predictions_array, bounding_boxes_array)
+        # train RPN
+        self.rpn.train(rois_array, IoUs_array)
 
-    # classifier predictions
-    preds, boxes = rcnn.classifier_predict(images[0], probs_array[0], boxes_array[0])
+    def train_classifier(self, data_path):
+        # load pre-trained model
+        self.rpn.model = load_model('RPN.h5')
+        # get images and respective XML data
+        images, bounding_boxes_array, labels_array = get_data(data_path)
+        # get rois for all images
+        rois_array, box_predictions_array = self.rpn.get_rois_list(images)
+        # get label data
+        _, label_nums_array = self.rpn.get_label_data(rois_array, box_predictions_array, bounding_boxes_array)
+        # map label numbers to classifier labels
+        training_labels = [[label_map[labels_array[i][label_num]] for label_num in label_nums_array[i]] for i in range(len(label_nums_array))]
+        # get RPN predictions for classification training
+        _, boxes_array, label_array = self.rpn.get_pred_list(rois_array, box_predictions_array, training_labels, confidence=0.3)
+        # train the classifier
+        self.classifier.train(images, boxes_array, label_array)
 
-    rcnn.show_RPN_pred(images[0], probs_array[0], boxes_array[0])
-    rcnn.show_classifier_pred(images[0], preds, boxes, confidence=0.5)
-
-
-def test(rcnn, image, bounding_boxes, labels):
-    # get rois for all images
-    rois, box_predictions = rcnn.get_rois(image)
-
-    rcnn.RPN = load_model('RPN.h5')
-
-    # get RPN predictions for classification training
-    probs, RPN_boxes, _ = rcnn.RPN_predict(rois, box_predictions, confidence=0.3)
-
-    #rcnn.train_classifier(images, boxes_array, label_array)
-    rcnn.classifier = load_model('classifier.h5')
-
-    # classifier predictions
-    preds, boxes = rcnn.classifier_predict(images[0], probs, RPN_boxes)
-
-    rcnn.show_RPN_pred(images[0], probs, RPN_boxes)
-    rcnn.show_classifier_pred(images[0], preds, boxes, confidence=0.5)
+    def test(self, data_path):
+        image = cv2.imread(data_path)
+        # load pre-trained model
+        self.rpn.model = load_model('RPN.h5')
+        self.classifier.model = load_model('classifier.h5')
+        # get rois
+        rois, box_predictions = self.rpn.get_rois(image)
+        # rpn predictions
+        probs, RPN_boxes, _ = self.rpn.predict(rois, box_predictions, confidence=0.3)
+        # classifier predictions
+        preds, boxes = self.classifier.predict(image, probs, RPN_boxes)
+        # show output
+        rcnn.rpn.show_pred(image, probs, RPN_boxes)
+        rcnn.classifier.show_pred(image, preds, boxes, confidence=0.3)
 
 
 
 if __name__ == "__main__":
     
     args = get_args()
-    images, bounding_boxes_array, labels_array = get_data('../data/object_detection/')
     
-    rcnn = RCNN(args)
-    
-    if args['type'] == "train":
-        train(rcnn, images, bounding_boxes_array, labels_array)
-    if args['type'] == "test":
-        test(rcnn, images[args['image']], bounding_boxes_array[args['image']], labels_array[args['image']])
+    rcnn = RCNN()
+    rcnn(args['path'], args['type'])
