@@ -6,7 +6,7 @@
 ## "Intersection over Union (IoU) for object detection" ##
 
 from tensorflow.keras.applications import InceptionResNetV2
-from tensorflow.keras.preprocessing.image import img_to_array
+from tensorflow.keras.preprocessing.image import img_to_array, ImageDataGenerator
 from tensorflow.keras.applications import imagenet_utils
 from tensorflow.keras import models, layers
 from tensorflow.keras.models import load_model
@@ -39,12 +39,16 @@ def get_args():
     args = vars(ap.parse_args())
     return args
 
-def get_data(path):
+def get_data(path, stop):
+    if path[-1] != '/':
+        path += '/'
     images_path = path + 'JPEGImages/'
     annotations_path = path + 'Annotations/'
 
     images = []
-    for im in os.listdir(images_path):
+    for i, im in enumerate(os.listdir(images_path)):
+        if i > stop:
+            break
         images.append(cv2.imread(images_path + im))
         
     annotations = []
@@ -79,6 +83,7 @@ class RPN:
             self.model = None
         else:
             self.make_model()
+        self.datagen = ImageDataGenerator(horizontal_flip=True, vertical_flip=True, brightness_range=(-0.2,0.2))
 
     def sliding_window(self, image, step, ws):
         # slide a window across the image
@@ -96,8 +101,6 @@ class RPN:
     def image_pyramid(self, image, scale, minSize):
         # yield the original image
         yield image
-        #print(image.shape)
-        # keep looping over the image pyramid
         while True:
             # compute the dimensions of the next image in the pyramid
             w = int(image.shape[1] / scale)
@@ -119,15 +122,10 @@ class RPN:
         yB = min(boxA[3], boxB[3])
         # compute the area of intersection rectangle
         interArea = max(0, xB - xA + 1) * max(0, yB - yA + 1)
-        # compute the area of both the prediction and ground-truth
-        # rectangles
         boxAArea = (boxA[2] - boxA[0] + 1) * (boxA[3] - boxA[1] + 1)
         boxBArea = (boxB[2] - boxB[0] + 1) * (boxB[3] - boxB[1] + 1)
-        # compute the intersection over union by taking the intersection
-        # area and dividing it by the sum of prediction + ground-truth
-        # areas - the interesection area
+        
         iou = interArea / float(boxAArea + boxBArea - interArea)
-        # return the intersection over union value
         return iou
 
     def max_IoU_search(self, predicted_box, true_boxes):
@@ -137,17 +135,17 @@ class RPN:
         return (np.max(IoUs), np.argmax(IoUs))
 
 
-    def get_IoUs(self, rois, predicted_boxes, bounding_boxes):
+    def get_IoUs(self, rois, predicted_boxes, bounding_boxes, imn):
         IoUs = []
         bb_numbers = []
-        print("\n[INFO] finding max IoU for each RoI")
+        print("\n[INFO] Finding max IoU for each RoI in image", imn)
         start = time.time()
         for i in range(len(predicted_boxes)):
             IoU, label_num = self.max_IoU_search(predicted_boxes[i], bounding_boxes)
             IoUs.append(IoU)
             bb_numbers.append(label_num)
         end = time.time()
-        print("[INFO] searching for max IoUs took {:.5f} seconds".format(end - start))
+        print("[INFO] Searching for max IoUs took {:.5f} seconds".format(end - start))
         IoUs = np.array(IoUs, dtype="float32")
         return (IoUs, bb_numbers)
 
@@ -160,14 +158,11 @@ class RPN:
         pyramid = self.image_pyramid(orig, scale=self.PYR_SCALE, minSize=self.MIN_SIZE)
         rois = []
         locs = []
-        print("\n[INFO] extracting RoIs from image pyramid")
+        print("\n[INFO] Extracting RoIs from image pyramid")
         start = time.time()
         
         for image in pyramid:
-            # determine the scale factor between the *original* image
-            # dimensions and the *current* layer of the pyramid
             scale = W / float(image.shape[1])
-            # for each layer of the image pyramid, loop over the sliding window locations
             for (x, y, roiOrig) in self.sliding_window(image, self.WIN_STEP, self.ROI_SIZE):
                 # scale the (x, y)-coordinates of the ROI with respect to the
                 # *original* image dimensions
@@ -209,19 +204,25 @@ class RPN:
             rois_array.append(rois)
             box_predictions_array.append(box_predictions)
         print('\n' + str(len(rois_array)) + " images")
-        print("ROIs shape:", np.asarray(rois_array[0]).shape, 
-            "\nBouding box predictions:", np.asarray(box_predictions_array[0]).shape)
-            #"\nBounding boxes:", np.asarray(bounding_boxes_array[0]).shape)
         return rois_array, box_predictions_array
 
     def get_label_data(self, rois_array, box_predictions_array, true_bounding_boxes_array):
         IoUs_array = []
         label_nums_array = []
         for i in range(len(rois_array)):
-            IoUs, bb_numbers = self.get_IoUs(rois_array[i], box_predictions_array[i], true_bounding_boxes_array[i])
+            IoUs, bb_numbers = self.get_IoUs(rois_array[i], box_predictions_array[i], true_bounding_boxes_array[i], i+1)
             IoUs_array.append(IoUs)
             label_nums_array.append(bb_numbers)
         return IoUs_array, label_nums_array
+
+    def get_classifier_data(self, box_predictions, IoUs_array, labels_array, confidence):
+        b = []
+        l = []
+        for i in range(len(IoUs_array)):
+            if IoUs_array[i] > confidence:
+                b.append(box_predictions[i])
+                l.append(labels_array[i])
+        return b, l
 
 
     def accuracy(self, y_true, y_pred):
@@ -265,7 +266,7 @@ class RPN:
         # normalize RoI pixel values
         x /= 255.
         x, y = shuffle(x, y)
-        self.model.fit(x, y, epochs=50, shuffle=True)
+        self.model.fit(self.datagen.flow(x, y, batch_size=32), steps_per_epoch=len(x)//32, epochs=50)
         self.model.save("RPN.h5")
 
     def predict(self, rois, box_predictions, labels_array=None, confidence=0.3):
@@ -289,16 +290,16 @@ class RPN:
                     labels.append(labels_array[i])
         return np.array(probs), np.array(boxes), np.array(labels)
 
-    def get_pred_list(self, rois_array, box_predictions_array, training_labels, confidence):
-        probs_array = []
+    def get_pred_list(self, rois_array, box_predictions_array, IoUs_array, training_labels, confidence):
+        print(len(box_predictions_array), len(box_predictions_array[0]))
         boxes_array = []
         label_array = []
         for i in range(len(rois_array)):
-            probs, boxes, labels = self.predict(rois_array[i], box_predictions_array[i], training_labels[i], confidence=confidence)
-            probs_array.append(probs)
+            #probs, boxes, labels = self.predict(rois_array[i], box_predictions_array[i], training_labels[i], confidence=confidence)
+            boxes, labels = self.get_classifier_data(box_predictions_array[i], IoUs_array[i], training_labels[i], confidence)
             boxes_array.append(boxes)
             label_array.append(labels)
-        return probs_array, boxes_array, label_array
+        return boxes_array, label_array
 
     def show_pred(self, image, probs, boxes, thresh):
        
@@ -326,6 +327,7 @@ class Classifier:
             self.model = None
         else:
             self.make_model()
+        self.datagen = ImageDataGenerator(horizontal_flip=True, vertical_flip=True, brightness_range=(-0.2,0.2))
     
     def make_model(self):
         conv_base = InceptionResNetV2(weights='imagenet', 
@@ -388,7 +390,7 @@ class Classifier:
                     j += 1
 
         # extract images from bounding box coordinates
-        print("[INFO] extract images from bounding box coordinates...")
+        print("[INFO] Extract images from bounding box coordinates...")
         x = []
         for image, boxes in zip(images, boxes_array):
             x.append([cv2.resize(image[y1:y2, x1:x2], (299, 299)) / 255. for (x1, y1, x2, y2) in boxes])
@@ -400,7 +402,7 @@ class Classifier:
         print("[INFO] Training classifier...")
 
         x, y = shuffle(x, y)
-        self.model.fit(x, y, epochs=30, shuffle=True)
+        self.model.fit(self.datagen.flow(x, y, batch_size=32), steps_per_epoch=len(x)//32, epochs=50)
         self.model.save("classifier.h5")
 
     def predict(self, image, probs, boxes, thresh):
@@ -448,6 +450,7 @@ class RCNN:
         self.args = args
         self.rpn = RPN(args['type'])
         self.classifier = Classifier(args['type'])
+        self.fully_annotated_images = 5
 
     def __call__(self, data_path, instruction):
         if instruction == 'train_all':
@@ -459,25 +462,9 @@ class RCNN:
         if instruction == 'test':
             self.test(data_path)
 
-    def train_all(self, data_path):
-        # get images and respective XML data
-        images, bounding_boxes_array, labels_array = get_data(data_path)
-        # get rois for all images
-        rois_array, box_predictions_array = self.rpn.get_rois_list(images)
-        # get label data
-        IoUs_array, label_nums_array = self.rpn.get_label_data(rois_array, box_predictions_array, bounding_boxes_array)
-        # train RPN
-        self.rpn.train(rois_array, IoUs_array)
-        # map label numbers to classifier labels
-        training_labels = [[label_map[labels_array[i][label_num]] for label_num in label_nums_array[i]] for i in range(len(label_nums_array))]
-        # get RPN predictions for classification training
-        _, boxes_array, label_array = self.rpn.get_pred_list(rois_array, box_predictions_array, training_labels, confidence=self.args['min-confidence'])
-        # train the classifier
-        self.classifier.train(images, boxes_array, label_array)
-
     def train_rpn(self, data_path):
         # get images and respective XML data
-        images, bounding_boxes_array, _ = get_data(data_path)
+        images, bounding_boxes_array, _ = get_data(data_path, self.fully_annotated_images)
         # get rois for all images
         rois_array, box_predictions_array = self.rpn.get_rois_list(images)
         # get label data
@@ -486,20 +473,22 @@ class RCNN:
         self.rpn.train(rois_array, IoUs_array)
 
     def train_classifier(self, data_path):
-        # load pre-trained model
-        self.rpn.model = load_model('RPN.h5')
         # get images and respective XML data
         images, bounding_boxes_array, labels_array = get_data(data_path)
         # get rois for all images
-        rois_array, box_predictions_array = self.rpn.get_rois_list(images)
+        rois_array, locs_array = self.rpn.get_rois_list(images)
         # get label data
-        _, label_nums_array = self.rpn.get_label_data(rois_array, box_predictions_array, bounding_boxes_array)
+        IoUs_array, label_nums_array = self.rpn.get_label_data(rois_array, locs_array, bounding_boxes_array)
         # map label numbers to classifier labels
         training_labels = [[label_map[labels_array[i][label_num]] for label_num in label_nums_array[i]] for i in range(len(label_nums_array))]
         # get RPN predictions for classification training
-        _, boxes_array, label_array = self.rpn.get_pred_list(rois_array, box_predictions_array, training_labels, confidence=self.args['min-confidence'])
+        boxes_array, label_array = self.rpn.get_pred_list(rois_array, locs_array, IoUs_array, training_labels, confidence=0.3)
         # train the classifier
         self.classifier.train(images, boxes_array, label_array)
+
+    def train_all(self, data_path):
+        self.train_rpn(data_path)
+        self.train_classifier(data_path)
 
     def test(self, data_path):
         image = cv2.imread(data_path)
@@ -511,10 +500,10 @@ class RCNN:
         # rpn predictions
         probs, RPN_boxes, _ = self.rpn.predict(rois, box_predictions, confidence=0.3)   # confidence of bounding box being over cell
         # classifier predictions
-        preds, boxes = self.classifier.predict(image, probs, RPN_boxes, thresh=0.5)     # non-max suppression threshold (higher number allows more overlap)
+        preds, boxes = self.classifier.predict(image, probs, RPN_boxes, thresh=0.5)                             # non-max suppression threshold (higher number allows more overlap)
         # show output                                                                    
-        self.rpn.show_pred(image, probs, RPN_boxes, thresh=0.5)                         # non-max suppression threshold
-        self.classifier.show_pred(image, preds, boxes, confidence=0.7)                  # confidence of pathology classification
+        self.rpn.show_pred(image, probs, RPN_boxes, thresh=0.5)                                                 # non-max suppression threshold
+        self.classifier.show_pred(image, preds, boxes, confidence=0.7)                                          # confidence of pathology classification
 
 
 
