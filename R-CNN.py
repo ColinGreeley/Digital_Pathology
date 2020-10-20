@@ -26,7 +26,7 @@ import json
 
 label_map = {'h':0, 'b':1, 'g':2, 'y':3}
 value_map = ['healthy', 'blue', 'green', 'yellow']
-color_map = [(0,0,0), (255,0,0), (0,255,0), (0,255,255)]
+color_map = [(0,0,0), (255,0,0), (0,255,0), (0,255,255)] #BGR
 
 def get_args():
     
@@ -34,7 +34,7 @@ def get_args():
     ap.add_argument("-t", "--type", type=str, required=True, help='-t "test" or "train_all" or "train_rpn" or "train_classifier"')
     ap.add_argument("-p", "--path", type=str, required=True, help="path to test image (test) or path to dataset (train)")
     ap.add_argument("-s", "--size", type=str, default="(32, 32)", help="ROI size (in pixels)")
-    ap.add_argument("-c", "--min-conf", type=float, default=0.7, help="minimum probability to filter weak detections")
+    ap.add_argument("-c", "--min-conf", type=float, default=0.3, help="minimum probability to filter weak detections")
     ap.add_argument("-v", "--visualize", type=int, default=-1, help="whether or not to show extra visualizations for debugging")
     args = vars(ap.parse_args())
     return args
@@ -69,14 +69,16 @@ def get_data(path):
 
 class RPN:
 
-    def __init__(self):
-        self.WIDTH = 1000
+    def __init__(self, t):
+        self.WIDTH = 1200
         self.PYR_SCALE = 1.3    # default: 1.5
         self.MIN_SIZE = (300, 300)
         self.ROI_SIZE = (32, 32)
         self.WIN_STEP = int(self.ROI_SIZE[0] / 4)
-        self.INPUT_SIZE = (256, 256)
-        self.make_model()
+        if t == 'test':
+            self.model = None
+        else:
+            self.make_model()
 
     def sliding_window(self, image, step, ws):
         # slide a window across the image
@@ -203,20 +205,20 @@ class RPN:
         rois_array = []
         box_predictions_array = []
         for image in images:
-            rois, box_predictions = rcnn.get_rois(image)
+            rois, box_predictions = self.get_rois(image)
             rois_array.append(rois)
             box_predictions_array.append(box_predictions)
         print('\n' + str(len(rois_array)) + " images")
         print("ROIs shape:", np.asarray(rois_array[0]).shape, 
-            "\nBouding box predictions:", np.asarray(box_predictions_array[0]).shape, 
-            "\nBounding boxes:", np.asarray(bounding_boxes_array[0]).shape)
+            "\nBouding box predictions:", np.asarray(box_predictions_array[0]).shape)
+            #"\nBounding boxes:", np.asarray(bounding_boxes_array[0]).shape)
         return rois_array, box_predictions_array
 
     def get_label_data(self, rois_array, box_predictions_array, true_bounding_boxes_array):
         IoUs_array = []
         label_nums_array = []
         for i in range(len(rois_array)):
-            IoUs, bb_numbers = rcnn.get_IoUs(rois_array[i], box_predictions_array[i], true_bounding_boxes_array[i])
+            IoUs, bb_numbers = self.get_IoUs(rois_array[i], box_predictions_array[i], true_bounding_boxes_array[i])
             IoUs_array.append(IoUs)
             label_nums_array.append(bb_numbers)
         return IoUs_array, label_nums_array
@@ -291,14 +293,14 @@ class RPN:
         probs_array = []
         boxes_array = []
         label_array = []
-        for i in range(len(images)):
-            probs, boxes, labels = rcnn.RPN_predict(rois_array[i], box_predictions_array[i], training_labels[i], confidence=confidence)
+        for i in range(len(rois_array)):
+            probs, boxes, labels = self.predict(rois_array[i], box_predictions_array[i], training_labels[i], confidence=confidence)
             probs_array.append(probs)
             boxes_array.append(boxes)
             label_array.append(labels)
         return probs_array, boxes_array, label_array
 
-    def show_pred(self, image, probs, boxes):
+    def show_pred(self, image, probs, boxes, thresh):
        
         orig = image
         (orig_H, orig_W) = orig.shape[:2]
@@ -307,7 +309,7 @@ class RPN:
         (Delta_H, Delta_W) = (orig_H / H, orig_W / W)
         clone = orig.copy()
 
-        boxes = non_max_suppression(boxes, probs=probs[:,0], overlapThresh=0.3)
+        boxes = non_max_suppression(boxes, probs=probs[:,0], overlapThresh=thresh)
         for box in boxes:
             (startX, startY, endX, endY) = box
             cv2.rectangle(clone, (int(startX/Delta_W), int(startY/Delta_H)), (int(endX/Delta_W), int(endY/Delta_H)), (0, 0, 0), 1)
@@ -319,8 +321,11 @@ class RPN:
 
 class Classifier:
 
-    def __init__(self):
-        self.make_model()
+    def __init__(self, t):
+        if t == 'test':
+            self.model = None
+        else:
+            self.make_model()
     
     def make_model(self):
         conv_base = InceptionResNetV2(weights='imagenet', 
@@ -337,6 +342,36 @@ class Classifier:
         model = models.Model(conv_base.input, output)
         model.compile(optimizer='rmsprop', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
         self.model = model
+
+    def custom_non_max_suppression(self, boxes, probs=None, overlapThresh=0.3):
+        if len(boxes) == 0:
+            return []
+        if boxes.dtype.kind == "i":
+            boxes = boxes.astype("float")
+        pick = []
+        x1 = boxes[:, 0]
+        y1 = boxes[:, 1]
+        x2 = boxes[:, 2]
+        y2 = boxes[:, 3]
+        area = (x2 - x1 + 1) * (y2 - y1 + 1)
+        idxs = y2
+        if probs is not None:
+            idxs = probs
+        idxs = np.argsort(idxs)
+        while len(idxs) > 0:
+            last = len(idxs) - 1
+            i = idxs[last]
+            pick.append(i)
+            xx1 = np.maximum(x1[i], x1[idxs[:last]])
+            yy1 = np.maximum(y1[i], y1[idxs[:last]])
+            xx2 = np.minimum(x2[i], x2[idxs[:last]])
+            yy2 = np.minimum(y2[i], y2[idxs[:last]])
+            w = np.maximum(0, xx2 - xx1 + 1)
+            h = np.maximum(0, yy2 - yy1 + 1)
+            overlap = (w * h) / area[idxs[:last]]
+            idxs = np.delete(idxs, np.concatenate(([last],
+                np.where(overlap > overlapThresh)[0])))
+        return pick
 
     def train(self, images, ba, la):
 
@@ -368,8 +403,8 @@ class Classifier:
         self.model.fit(x, y, epochs=30, shuffle=True)
         self.model.save("classifier.h5")
 
-    def predict(self, image, probs, boxes):
-        boxes = non_max_suppression(boxes, probs=probs[:,0], overlapThresh=0.3)
+    def predict(self, image, probs, boxes, thresh):
+        boxes = non_max_suppression(boxes, probs=probs[:,0], overlapThresh=thresh)
         x = np.array([cv2.resize(image[y1:y2, x1:x2], (299, 299)) / 255. for (x1, y1, x2, y2) in boxes])
         print('\nClassifier prediction input shape:', x.shape)
         print("[INFO] Classifying pathologies...")
@@ -394,12 +429,14 @@ class Classifier:
             if preds[i, 1] >= confidence or preds[i, 2] >= confidence or preds[i, 3] >= confidence:
                 diseased_boxes.append(boxes[i])
                 diseased_preds.append(preds[i, 1:])
+        diseased_boxes = np.array(diseased_boxes)
+        diseased_preds = np.array(diseased_preds)
 
-        #boxes = non_max_suppression(boxes, probs=preds[:,0], overlapThresh=0.3)
-        for box, pred in zip(diseased_boxes, diseased_preds):
+        idxs = self.custom_non_max_suppression(diseased_boxes, probs=np.max(diseased_preds, axis=-1), overlapThresh=0.3)
+        for box, pred in zip(diseased_boxes[idxs], diseased_preds[idxs]):
             (startX, startY, endX, endY) = box
             cv2.rectangle(clone, (int(startX/Delta_W), int(startY/Delta_H)), (int(endX/Delta_W), int(endY/Delta_H)), color_map[np.argmax(pred)+1], 1)
-            cv2.putText(clone, '{:.2f}%'.format(max(pred)), (int(startX/Delta_W), int(startY/Delta_H)-10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0,0,0), 1)
+            cv2.putText(clone, '{:.0f}%'.format(max(pred)*100), (int(startX/Delta_W), int(startY/Delta_H)-10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0,0,0), 1)
         cv2.imshow("Before", clone)
         cv2.waitKey(0)
         cv2.imwrite('./Classifier_Prediction.jpg', clone)
@@ -407,9 +444,10 @@ class Classifier:
 
 class RCNN:
 
-    def __init__(self):
-        self.rpn = RPN()
-        self.classifier = Classifier()
+    def __init__(self, args):
+        self.args = args
+        self.rpn = RPN(args['type'])
+        self.classifier = Classifier(args['type'])
 
     def __call__(self, data_path, instruction):
         if instruction == 'train_all':
@@ -433,7 +471,7 @@ class RCNN:
         # map label numbers to classifier labels
         training_labels = [[label_map[labels_array[i][label_num]] for label_num in label_nums_array[i]] for i in range(len(label_nums_array))]
         # get RPN predictions for classification training
-        _, boxes_array, label_array = self.rpn.get_pred_list(rois_array, box_predictions_array, training_labels, confidence=0.3)
+        _, boxes_array, label_array = self.rpn.get_pred_list(rois_array, box_predictions_array, training_labels, confidence=self.args['min-confidence'])
         # train the classifier
         self.classifier.train(images, boxes_array, label_array)
 
@@ -459,7 +497,7 @@ class RCNN:
         # map label numbers to classifier labels
         training_labels = [[label_map[labels_array[i][label_num]] for label_num in label_nums_array[i]] for i in range(len(label_nums_array))]
         # get RPN predictions for classification training
-        _, boxes_array, label_array = self.rpn.get_pred_list(rois_array, box_predictions_array, training_labels, confidence=0.3)
+        _, boxes_array, label_array = self.rpn.get_pred_list(rois_array, box_predictions_array, training_labels, confidence=self.args['min-confidence'])
         # train the classifier
         self.classifier.train(images, boxes_array, label_array)
 
@@ -471,12 +509,12 @@ class RCNN:
         # get rois
         rois, box_predictions = self.rpn.get_rois(image)
         # rpn predictions
-        probs, RPN_boxes, _ = self.rpn.predict(rois, box_predictions, confidence=0.3)
+        probs, RPN_boxes, _ = self.rpn.predict(rois, box_predictions, confidence=0.3)   # confidence of bounding box being over cell
         # classifier predictions
-        preds, boxes = self.classifier.predict(image, probs, RPN_boxes)
-        # show output
-        rcnn.rpn.show_pred(image, probs, RPN_boxes)
-        rcnn.classifier.show_pred(image, preds, boxes, confidence=0.3)
+        preds, boxes = self.classifier.predict(image, probs, RPN_boxes, thresh=0.5)     # non-max suppression threshold (higher number allows more overlap)
+        # show output                                                                    
+        self.rpn.show_pred(image, probs, RPN_boxes, thresh=0.5)                         # non-max suppression threshold
+        self.classifier.show_pred(image, preds, boxes, confidence=0.7)                  # confidence of pathology classification
 
 
 
@@ -484,5 +522,4 @@ if __name__ == "__main__":
     
     args = get_args()
     
-    rcnn = RCNN()
-    rcnn(args['path'], args['type'])
+    RCNN(args)(args['path'], args['type'])
