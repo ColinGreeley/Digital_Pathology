@@ -40,18 +40,20 @@ def get_args():
     return args
 
 def get_data(path, stop=10000):
-    images_path = path + '/JPEGImages/'
-    annotations_path = path + '/Annotations/'
+    if path[-1] != '/':
+        path += '/'
+    images_path = path + 'JPEGImages/'
+    annotations_path = path + 'Annotations/'
 
     images = []
     for i, im in enumerate(os.listdir(images_path)):
-        if i > stop:
+        if i >= stop:
             break
         images.append(cv2.imread(images_path + im))
         
     annotations = []
     for i, an in enumerate(os.listdir(annotations_path)):
-        if i > stop:
+        if i >= stop:
             break
         with open(annotations_path + an, 'rb') as f:
             annotations.append(xmltodict.parse(f)['annotation']['object'])
@@ -135,7 +137,7 @@ class RPN:
         return (np.max(IoUs), np.argmax(IoUs))
 
 
-    def get_IoUs(self, rois, predicted_boxes, bounding_boxes, imn):
+    def get_IoUs(self, predicted_boxes, bounding_boxes, imn):
         IoUs = []
         bb_numbers = []
         print("\n[INFO] Finding max IoU for each RoI in image", imn)
@@ -173,7 +175,7 @@ class RPN:
                 
                 roi = cv2.resize(roiOrig, self.ROI_SIZE)
                 # update our list of ROIs and associated coordinates
-                if not containsWhite(roi):
+                if not containsWhite(roiOrig):
                     rois.append(roi)
                     locs.append((x*Delta_W, y*Delta_H, (x + w)*Delta_W, (y + h)*Delta_H))
 
@@ -196,21 +198,29 @@ class RPN:
         locs = np.array(locs, dtype="int32")
         return (rois, locs)
 
-    def get_rois_list(self, images):
-        rois_array = []
-        box_predictions_array = []
-        for image in images:
-            rois, box_predictions = self.get_rois(image)
-            rois_array.append(rois)
-            box_predictions_array.append(box_predictions)
-        print('\n' + str(len(rois_array)) + " images")
-        return rois_array, box_predictions_array
+    def get_rois_list(self, images, get_images=False):
+        if get_images == False:
+            rois_array = []
+            for image in images:
+                _, rois = self.get_rois(image)
+                rois_array.append(rois)
+            print('\n' + str(len(rois_array)) + " images")
+            return ([], rois_array)
+        else:
+            roi_images_array = []
+            rois_array = []
+            for image in images:
+                roi_images, rois = self.get_rois(image)
+                roi_images_array.append(roi_images)
+                rois_array.append(rois)
+            print('\n' + str(len(rois_array)) + " images")
+            return (roi_images_array, rois_array)
 
-    def get_label_data(self, rois_array, box_predictions_array, true_bounding_boxes_array):
+    def get_label_data(self, box_predictions_array, true_bounding_boxes_array):
         IoUs_array = []
         label_nums_array = []
-        for i in range(len(rois_array)):
-            IoUs, bb_numbers = self.get_IoUs(rois_array[i], box_predictions_array[i], true_bounding_boxes_array[i], i+1)
+        for i in range(len(box_predictions_array)):
+            IoUs, bb_numbers = self.get_IoUs(box_predictions_array[i], true_bounding_boxes_array[i], i+1)
             IoUs_array.append(IoUs)
             label_nums_array.append(bb_numbers)
         return IoUs_array, label_nums_array
@@ -259,8 +269,8 @@ class RPN:
 
     def train(self, rois_array, IoUs_array):
 
-        x = np.append(*rois_array, axis=0)
-        y = np.append(*IoUs_array, axis=0)
+        x = np.concatenate(rois_array, axis=0)
+        y = np.concatenate(IoUs_array, axis=0)
         print("X:", x.shape, " Y:", y.shape)
 
         # normalize RoI pixel values
@@ -269,10 +279,11 @@ class RPN:
         self.model.fit(self.datagen.flow(x, y, batch_size=32), steps_per_epoch=len(x)//32, epochs=50)
         self.model.save("RPN.h5")
 
-    def predict(self, rois, box_predictions, labels_array=None, confidence=0.3):
+    def predict(self, roi_images, rois, labels_array=None, confidence=0.3):
+
         print("\n[INFO] Classifying ROIs...")
         start = time.time()
-        preds = self.model.predict(rois/255.)
+        preds = self.model.predict(roi_images/255.)
         end = time.time()
         print("[INFO] Classifying ROIs took {:.5f} seconds".format(end - start))
         
@@ -280,23 +291,22 @@ class RPN:
         probs = []
         labels = []
         print("Preds shape:", preds.shape)
-        print("Box predictions shape:", box_predictions.shape)
+        print("Box predictions shape:", rois.shape)
         for i in range(len(preds)):
             if preds[i] >= confidence:
                 #print(preds[i])
                 probs.append(preds[i])
-                boxes.append(box_predictions[i])
+                boxes.append(rois[i])
                 if labels_array is not None:
                     labels.append(labels_array[i])
         return np.array(probs), np.array(boxes), np.array(labels)
 
-    def get_pred_list(self, rois_array, box_predictions_array, IoUs_array, training_labels, confidence):
-        print(len(box_predictions_array), len(box_predictions_array[0]))
+    def get_pred_list(self, rois_array, IoUs_array, training_labels, confidence):
         boxes_array = []
         label_array = []
         for i in range(len(rois_array)):
-            #probs, boxes, labels = self.predict(rois_array[i], box_predictions_array[i], training_labels[i], confidence=confidence)
-            boxes, labels = self.get_classifier_data(box_predictions_array[i], IoUs_array[i], training_labels[i], confidence)
+            #probs, boxes, labels = self.predict(roi_images_array[i], rois_array[i], training_labels[i], confidence=confidence)
+            boxes, labels = self.get_classifier_data(rois_array[i], IoUs_array[i], training_labels[i], confidence)
             boxes_array.append(boxes)
             label_array.append(labels)
         return boxes_array, label_array
@@ -379,7 +389,7 @@ class Classifier:
 
         boxes_array = ba
         label_array = la
-        # remove 80% of the heathly cells from training set
+        # remove 50% of the heathly cells from training set
         for i in range(len(boxes_array)):
             j = 0
             while j < len(label_array[i]):
@@ -390,19 +400,19 @@ class Classifier:
                     j += 1
 
         # extract images from bounding box coordinates
-        print("[INFO] Extract images from bounding box coordinates...")
+        print("\n[INFO] Extracting images from bounding box coordinates...")
         x = []
         for image, boxes in zip(images, boxes_array):
             x.append([cv2.resize(image[y1:y2, x1:x2], (299, 299)) / 255. for (x1, y1, x2, y2) in boxes])
         
-        x = np.append(*x, axis=0)
-        y = np.append(*label_array, axis=0)
+        x = np.concatenate(x, axis=0)
+        y = np.concatenate(label_array, axis=0)
 
         print("X:", x.shape, " Y:", y.shape)
         print("[INFO] Training classifier...")
 
         x, y = shuffle(x, y)
-        self.model.fit(self.datagen.flow(x, y, batch_size=32), steps_per_epoch=len(x)//32, epochs=50)
+        self.model.fit(self.datagen.flow(x, y, batch_size=32), steps_per_epoch=len(x)//32, epochs=500)
         self.model.save("classifier.h5")
 
     def predict(self, image, probs, boxes, thresh):
@@ -466,23 +476,23 @@ class RCNN:
         # get images and respective XML data
         images, bounding_boxes_array, _ = get_data(data_path, self.fully_annotated_images)
         # get rois for all images
-        rois_array, box_predictions_array = self.rpn.get_rois_list(images)
+        roi_images_array, rois_array = self.rpn.get_rois_list(images, True)
         # get label data
-        IoUs_array, _ = self.rpn.get_label_data(rois_array, box_predictions_array, bounding_boxes_array)
+        IoUs_array, _ = self.rpn.get_label_data(rois_array, bounding_boxes_array)
         # train RPN
-        self.rpn.train(rois_array, IoUs_array)
+        self.rpn.train(roi_images_array, IoUs_array)
 
     def train_classifier(self, data_path):
         # get images and respective XML data
         images, bounding_boxes_array, labels_array = get_data(data_path)
         # get rois for all images
-        rois_array, locs_array = self.rpn.get_rois_list(images)
+        _, rois_array = self.rpn.get_rois_list(images)
         # get label data
-        IoUs_array, label_nums_array = self.rpn.get_label_data(rois_array, locs_array, bounding_boxes_array)
+        IoUs_array, label_nums_array = self.rpn.get_label_data(rois_array, bounding_boxes_array)
         # map label numbers to classifier labels
         training_labels = [[label_map[labels_array[i][label_num]] for label_num in label_nums_array[i]] for i in range(len(label_nums_array))]
         # get RPN predictions for classification training
-        boxes_array, label_array = self.rpn.get_pred_list(rois_array, locs_array, IoUs_array, training_labels, confidence=0.3)
+        boxes_array, label_array = self.rpn.get_pred_list(rois_array, IoUs_array, training_labels, confidence=0.3)
         # train the classifier
         self.classifier.train(images, boxes_array, label_array)
 
@@ -496,9 +506,9 @@ class RCNN:
         self.rpn.model = load_model('RPN.h5')
         self.classifier.model = load_model('classifier.h5')
         # get rois
-        rois, box_predictions = self.rpn.get_rois(image)
+        roi_images, rois = self.rpn.get_rois(image)
         # rpn predictions
-        probs, RPN_boxes, _ = self.rpn.predict(rois, box_predictions, confidence=0.3)   # confidence of bounding box being over cell
+        probs, RPN_boxes, _ = self.rpn.predict(roi_images, rois, confidence=0.3)   # confidence of bounding box being over cell
         # classifier predictions
         preds, boxes = self.classifier.predict(image, probs, RPN_boxes, thresh=0.5)     # non-max suppression threshold (higher number allows more overlap)
         # show output                                                                    
