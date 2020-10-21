@@ -39,11 +39,9 @@ def get_args():
     args = vars(ap.parse_args())
     return args
 
-def get_data(path, stop):
-    if path[-1] != '/':
-        path += '/'
-    images_path = path + 'JPEGImages/'
-    annotations_path = path + 'Annotations/'
+def get_data(path, stop=10000):
+    images_path = path + '/JPEGImages/'
+    annotations_path = path + '/Annotations/'
 
     images = []
     for i, im in enumerate(os.listdir(images_path)):
@@ -52,7 +50,9 @@ def get_data(path, stop):
         images.append(cv2.imread(images_path + im))
         
     annotations = []
-    for an in os.listdir(annotations_path):
+    for i, an in enumerate(os.listdir(annotations_path)):
+        if i > stop:
+            break
         with open(annotations_path + an, 'rb') as f:
             annotations.append(xmltodict.parse(f)['annotation']['object'])
 
@@ -500,10 +500,10 @@ class RCNN:
         # rpn predictions
         probs, RPN_boxes, _ = self.rpn.predict(rois, box_predictions, confidence=0.3)   # confidence of bounding box being over cell
         # classifier predictions
-        preds, boxes = self.classifier.predict(image, probs, RPN_boxes, thresh=0.5)                             # non-max suppression threshold (higher number allows more overlap)
+        preds, boxes = self.classifier.predict(image, probs, RPN_boxes, thresh=0.5)     # non-max suppression threshold (higher number allows more overlap)
         # show output                                                                    
-        self.rpn.show_pred(image, probs, RPN_boxes, thresh=0.5)                                                 # non-max suppression threshold
-        self.classifier.show_pred(image, preds, boxes, confidence=0.7)                                          # confidence of pathology classification
+        self.rpn.show_pred(image, probs, RPN_boxes, thresh=0.5)                         # non-max suppression threshold
+        self.classifier.show_pred(image, preds, boxes, confidence=0.7)                  # confidence of pathology classification
 
 
 
