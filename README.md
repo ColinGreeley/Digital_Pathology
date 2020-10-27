@@ -21,13 +21,13 @@ Diagram illustrating  the model architecture:
 ---
 
 #### Image with annotation overlayer given by medical professional to show true pathology locations. Input images for this model do not include annotations.
-<img src="diseased_dots_0002.jpg" width="500" height="650" style="border:1px solid black;float:middle">
+<img src="diseased_dots_0002.jpg" width="500" height="650" style="border:3px solid black;">
 
 #### RPN output given the input image with no annotations, each bounding box region is fed to the classifier after non-maximum suppression.
-<img src="RPN_Prediction.jpg"  width="500" height="650" style="border:1px solid black;">
+<img src="RPN_Prediction.jpg"  width="500" height="650" style="border:3px solid black;">
 
 #### Classifier bounding box overlay on original input image. Each color represents the respective pathology classified. The percentages represent the classifier's confidence.
-<img src="Classifier_Prediction.jpg"  width="500" height="650" style="border:1px solid black;">
+<img src="Classifier_Prediction.jpg"  width="500" height="650" style="border:3px solid black;">
 
 ---
 
