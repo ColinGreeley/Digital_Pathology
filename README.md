@@ -60,6 +60,6 @@ The options for "type" are:
 
 The "path" variable refers to the path to the image that you want to classify.
 
-#####*Example:*
+##### *Example:*
 *cd Digital_pathology*
 *python ./R-CNN.py -t test -p ../images/image_i_want_to_classify.jpg*
