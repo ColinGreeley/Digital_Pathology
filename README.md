@@ -12,7 +12,7 @@ The approach that I am interested in to work around this problem is called image
 
 ### Methodology 
 
-This program uses a custom RCNN algorithm to work with high resolution images (roughly 800x12000 pixels). The model is composed of two seperate deep neural networks, a Region Proposal Network (RPN) and a classifier. The first step is to downscale the image (by around a factor of 10) so that RPN can make prediction much faster. The RPN takes 32x32px images given by a sliding window/image pyramid approach and predicts the intersection over union (IOU) of any cell in the image. All regions of interest that exceed a given threshold are then fed to the classifier for pathology prediction. If any pathologies exceed a user defined threshold, then the bounding boxes for those cells will be displayed on the final image.
+This program uses a custom RCNN algorithm to work with high resolution images (roughly 8000x12000 pixels). The model is composed of two seperate deep neural networks, a Region Proposal Network (RPN) and a classifier. The first step is to downscale the image (by around a factor of 10) so that RPN can make prediction much faster. The RPN takes 32x32px images given by a sliding window/image pyramid approach and predicts the intersection over union (IOU) of any cell in the image. All regions of interest that exceed a given threshold are then fed to the classifier for pathology prediction. If any pathologies exceed a user defined threshold, then the bounding boxes for those cells will be displayed on the final image.
 
 Diagram illustrating  the model architecture:
 
