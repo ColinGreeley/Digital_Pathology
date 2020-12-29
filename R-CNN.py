@@ -6,10 +6,12 @@
 from tensorflow.keras.applications import InceptionResNetV2
 from tensorflow.keras.preprocessing.image import img_to_array, ImageDataGenerator
 from tensorflow.keras.applications import imagenet_utils
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 from tensorflow.keras import models, layers, optimizers
 from tensorflow.keras.models import load_model
 import tensorflow.keras.backend as K
 from imutils.object_detection import non_max_suppression
+from scipy.stats.distributions import norm
 from generatetiles import containsWhite
 from collections import namedtuple
 import numpy as np
@@ -25,7 +27,7 @@ import json
 
 label_map = {'h':0, 'b':1, 'g':2, 'y':3}
 value_map = ['healthy', 'blue', 'green', 'yellow']
-color_map = [(0,0,0), (0,0,255), (0,255,0), (255,255,0)] #BGR
+color_map = [(0,0,0), (0,0,255), (0,255,0), (255,255,0)]
 
 def get_args():
     
@@ -69,7 +71,7 @@ def get_data(path, stop=10000):
         bb_array.append(np.array(bounding_boxes, dtype='int32'))
         labels_array.append(labels)
     
-    return (images, bb_array, labels_array)
+    return (images[:], bb_array[:], labels_array[:])
 
 
 class RPN:
@@ -124,22 +126,28 @@ class RPN:
         boxBArea = (boxB[2] - boxB[0] + 1) * (boxB[3] - boxB[1] + 1)
         
         iou = interArea / float(boxAArea + boxBArea - interArea)
+        # if the predicted box is smaller than the true box, return 0
+        #if np.abs(boxA[0]-boxA[2]) * np.abs(boxA[1]-boxA[3]) < np.abs(boxB[0]-boxB[2]) * np.abs(boxB[1]-boxB[3]):
+        #    iou = iou * iou
         return iou
 
     def max_IoU_search(self, predicted_box, true_boxes):
         IoUs = []
-        for i in range(len(true_boxes)):
+        i = 0
+        while i < len(true_boxes):
             IoUs.append(self.bb_intersection_over_union(predicted_box, true_boxes[i]))
+            i += 1
         return (np.max(IoUs), np.argmax(IoUs))
 
 
     def get_IoUs(self, predicted_boxes, bounding_boxes, imn):
+        true_boxes = bounding_boxes
         IoUs = []
         bb_numbers = []
         print("\n[INFO] Finding max IoU for each RoI in image", imn)
         start = time.time()
         for i in range(len(predicted_boxes)):
-            IoU, label_num = self.max_IoU_search(predicted_boxes[i], bounding_boxes)
+            IoU, label_num = self.max_IoU_search(predicted_boxes[i], true_boxes)
             IoUs.append(IoU)
             bb_numbers.append(label_num)
         end = time.time()
@@ -239,10 +247,11 @@ class RPN:
         loss = K.mean(sqe, axis=-1)
         return loss
 
-    def conv_node(self, inputs, filters, kernel):
-        x = layers.Conv2D(filters, kernel, padding='same')(inputs)
-        y = layers.Conv2D(filters, 1)(inputs)
-        x = layers.Add()([y, x])
+    def conv_node(self, inputs, filters):
+        x = layers.Conv2D(filters, 3, padding='same')(inputs)
+        x = layers.BatchNormalization()(x)
+        x = layers.Activation('relu')(x)
+        x = layers.Conv2D(filters, 3, padding='same')(x)
         x = layers.BatchNormalization()(x)
         x = layers.Activation('relu')(x)
         x = layers.MaxPooling2D()(x)
@@ -252,22 +261,22 @@ class RPN:
         # region proposal network
         input_layer = layers.Input(shape=(*self.ROI_SIZE, 3))
 
-        l1 = self.conv_node(input_layer, 64, 3)
-        l2 =          self.conv_node(l1, 128, 3)
-        l3 =          self.conv_node(l2, 256, 3)
+        x = self.conv_node(input_layer, 64)
+        x = self.conv_node(x, 128)
+        x = self.conv_node(x, 256)
 
-        x = layers.Flatten()(l3)
+        x = layers.Flatten()(x)
         x = layers.Dense(512)(x)
         x = layers.BatchNormalization()(x)
         x = layers.Activation('relu')(x)
-        x = layers.Dropout(0.3)(x)
+        x = layers.Dropout(0.2)(x)
         x = layers.Dense(64, activation='relu')(x)
         x = layers.Dropout(0.1)(x)
         output_layer = layers.Dense(1, activation='sigmoid')(x)
 
         model = models.Model(input_layer, output_layer)
-        model.compile(optimizer=optimizers.Adam(), loss=[self.custom_loss], metrics=[self.accuracy])
-        #model.summary()
+        model.compile(optimizer=optimizers.Adam(learning_rate=0.001), loss=[self.custom_loss], metrics=[self.accuracy])
+        model.summary()
         self.model = model
 
     def load(self, name):
@@ -276,33 +285,51 @@ class RPN:
         self.model.compile(optimizer=optimizers.Adam(), loss=[self.custom_loss], metrics=[self.accuracy])
 
     def cleave_data(self, x, y):
-        new_x = []
-        new_y = []
+        remove_array = []
+        for i in range(len(y)):
+            if y[i] == 0:
+                remove_array.append(i)
+        x = np.delete(x, remove_array, axis=0)
+        y = np.delete(y, remove_array, axis=0)
+        '''
+        remove_array = []
+        mean, var = norm.fit(y)
+        st = np.argsort(y)
+        y = y[st]
+        x = x[st]
+        index = 0
+        inc = 1.0 / len(y)
         i = 0
-        while i < len(y):
-            if y[i] + 0.5 > np.random.random():
-                new_x.append(x[i]) 
-                new_y.append(y[i]) 
+        while i < int(len(y) * 0.2):
+            R = np.random.normal(mean, var)
+            index = int(R / inc)
+            while index in remove_array or index < 0:
+                R = np.random.random()
+                index = int(R / inc)
+            remove_array.append(index)
             i += 1
-        return np.array(new_x), np.array(new_y)
+        x = np.delete(x, remove_array, axis=0)
+        y = np.delete(y, remove_array, axis=0)
+        '''
+        return x, y
 
-    def train(self, rois_array, IoUs_array, batch_size=256):
+    def train(self, rois_array, IoUs_array, batch_size=128):
 
         x = np.concatenate(rois_array, axis=0)
         y = np.concatenate(IoUs_array, axis=0)
-        print("X:", x, " Y:", y)
         print(sorted(y)[-10:])
         print("X:", x.shape, " Y:", y.shape)
 
         y /= max(y)
-        print(y)
-        #x, y = self.cleave_data(x, y)
-        #plt.hist(y, bins=20)
+        #plt.figure(figsize=(16,9))
+        #plt.hist(y, 20)
         #plt.show()
-        #print("X:", x.shape, " Y:", y.shape)
-        for i in range(5):
-            x, y = shuffle(x, y)
-            self.model.fit(self.datagen.flow(x, y, batch_size=batch_size), steps_per_epoch=len(x)//batch_size, epochs=100)
+        x, y = self.cleave_data(x, y)
+        print("X:", x.shape, " Y:", y.shape)
+        x, y = shuffle(x, y)
+        for i in range(50):
+            print("\nEpisode:", i+1)
+            self.model.fit(self.datagen.flow(x, y, batch_size=batch_size), steps_per_epoch=len(x)//batch_size, epochs=50, callbacks=[ReduceLROnPlateau(monitor='loss', min_lr=0.0001)])
             self.model.save_weights("RPN_weights"+str(i)+".h5")
             self.model.save("RPN"+str(i)+".h5")
 
@@ -363,7 +390,7 @@ class RPN:
 class Classifier:
 
     def __init__(self):
-        self.input_size = (256, 256)
+        self.input_size = (299, 299)
         self.make_model()
         self.datagen = ImageDataGenerator(rescale=1/255, horizontal_flip=True, vertical_flip=True, brightness_range=(0.8,1.2))
     
@@ -460,18 +487,18 @@ class Classifier:
         x, y = shuffle(x, y)
         return x, y
 
-    def train(self, images, ba, la, batch_size=64):
+    def train(self, images, ba, la, batch_size=256):
 
-        for i in range(10):
+        for i in range(5):
             print("\nEpisode:", i+1)
-            boxes_array, label_array = self.cleave_data(ba, la, 0.85)
+            boxes_array, label_array = self.cleave_data(ba, la, 0.5)
             x, y = self.format_data(images, boxes_array, label_array)
             #for j,k in zip(x[:5],y[:5]):
             #    plt.figure(figsize=(16,9))
             #    plt.imshow(x)
             #    plt.title(str(y))
             #    plt.show()
-            self.model.fit(self.datagen.flow(x, y, batch_size=batch_size), steps_per_epoch=len(x)//batch_size, epochs=100)
+            self.model.fit(self.datagen.flow(x, y, batch_size=batch_size), steps_per_epoch=len(x)//batch_size, epochs=200)
             x,y,boxes_array,label_array = None, None, None, None
             del x
             del y
@@ -559,7 +586,7 @@ class RCNN:
         # map label numbers to classifier labels
         training_labels = [[label_map[labels_array[i][label_num]] for label_num in label_nums_array[i]] for i in range(len(label_nums_array))]
         # get RPN predictions for classification training
-        boxes_array, label_array = self.rpn.get_pred_list(rois_array, IoUs_array, training_labels, confidence=0.3)
+        boxes_array, label_array = self.rpn.get_pred_list(rois_array, IoUs_array, training_labels, confidence=0.5)
         # train the classifier
         self.classifier.train(images, boxes_array, label_array)
 
@@ -574,11 +601,11 @@ class RCNN:
         self.rpn.load('models/RPN3.h5')
         #self.rpn.model = load_model('models/RPN3.h5')
         #self.classifier.load('classifier_weights15.h5')
-        self.classifier.model = load_model('classifier0.h5')
+        self.classifier.model = load_model('classifier6.h5')
         # get rois
         roi_images, rois = self.rpn.get_rois(image)
         # rpn predictions
-        probs, RPN_boxes, _ = self.rpn.predict(roi_images, rois, confidence=0.1)        # confidence of bounding box being over cell
+        probs, RPN_boxes, _ = self.rpn.predict(roi_images, rois, confidence=0.3)        # confidence of bounding box being over cell
         # classifier predictions
         preds, boxes = self.classifier.predict(image, probs, RPN_boxes, thresh=0.5)     # non-max suppression threshold (higher number allows more overlap)
         # show output                                                                    
