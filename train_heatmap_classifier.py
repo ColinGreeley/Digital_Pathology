@@ -9,9 +9,10 @@ from tensorflow.keras.applications import EfficientNetB2
 from tensorflow.keras.preprocessing.image import img_to_array, array_to_img
 import matplotlib.cm as cm
 import matplotlib.pyplot as plt
+from sklearn.model_selection import KFold
 from sklearn.utils import shuffle
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import confusion_matrix
+from sklearn.metrics import confusion_matrix, roc_curve, roc_auc_score, precision_recall_curve, auc
 import time
 import pickle
 
@@ -49,9 +50,9 @@ def containsTooMuchBackground(image):
 # ----- Classify Image -----
 
 def make_model(weights=None):
-    cb = EfficientNetB2(weights='imagenet', include_top=False, drop_connect_rate=0.4, pooling='avg', input_shape=(TILE_SIZE, TILE_SIZE, 3))
+    cb = EfficientNetB2(weights='imagenet', include_top=False, drop_connect_rate=0.4, pooling='avg', input_shape=(256, 256, 3))
     x = cb.output
-    x = layers.GaussianNoise(1.0)(x)
+    x = layers.GaussianDropout(0.3)(x)
     x = layers.Dense(2, activation='softmax', kernel_regularizer='l1_l2')(x)
     model = Model(cb.input, x)
     #model.summary()
@@ -106,17 +107,18 @@ def processImage(image_file_name):
         y2 += TILE_INCREMENT
     return (np.asarray(tiles), np.asarray(locs), image)
 
-def make_heatmaps(path, model):
-    diseased_dir = path + 'images/diseased/'
-    non_diseased_dir = path + 'images/non_diseased/'
-    diseased_heatmap_dir = path + 'heatmaps/diseased/'
-    non_diseased_heatmap_dir = path + 'heatmaps/non_diseased/'
+def make_heatmaps(path, model, tissue_type):
+    diseased_dir = path + 'images/' + tissue_type + '/diseased/'
+    non_diseased_dir = path + 'images/' + tissue_type + '/non_diseased/'
+    diseased_heatmap_dir = path + 'heatmaps/' + tissue_type + '/diseased/'
+    non_diseased_heatmap_dir = path + 'heatmaps/' + tissue_type + '/non_diseased/'
     diseased_list = os.listdir(diseased_dir)
     non_diseased_list = os.listdir(non_diseased_dir)
 
     print("\n[INFO] Generating heatmaps for diseased images")
     start = time.time()
-    for i, im in enumerate(diseased_list[:]):
+    for i, im in enumerate(diseased_list[:1]):
+        print(im)
         processed_image = processImage(diseased_dir + im)
         pred_locs, image = predict(processed_image, model)
         canvas, canvas_val = make_canvas(pred_locs, image)
@@ -127,20 +129,22 @@ def make_heatmaps(path, model):
     print("\n[INFO] Generating heatmaps for non_diseased images")
     start = time.time()
     for i, im in enumerate(non_diseased_list[:]):
+        print(im)
         processed_image = processImage(non_diseased_dir + im)
-        pred_locs, image = predict(processed_image, model)
-        canvas, canvas_val = make_canvas(pred_locs, image)
-        cv2.imwrite(non_diseased_heatmap_dir + "non_diseased_heatmap_{}.jpg".format(i+1), canvas*255)
-        with open(non_diseased_heatmap_dir + "non_diseased_heatmap_{}.txt".format(i+1), 'w') as f:
-            f.write(str(canvas_val))
+        if processed_image[0].size != 0:
+            pred_locs, image = predict(processed_image, model)
+            canvas, canvas_val = make_canvas(pred_locs, image)
+            cv2.imwrite(non_diseased_heatmap_dir + "non_diseased_heatmap_{}.jpg".format(i+1), canvas*255)
+            with open(non_diseased_heatmap_dir + "non_diseased_heatmap_{}.txt".format(i+1), 'w') as f:
+                f.write(str(canvas_val))
     print("[INFO] Generating heatmaps for non_diseased images took {} seconds".format(round(time.time() - start, 2)))
     #data = np.concatenate([diseased_processed_images, non_diseased_processed_images], axis=0)
     #labels = np.concatenate([[0 for i in range(len(diseased_processed_images))], [1 for i in range(len(non_diseased_processed_images))]], axis=0)
     #return data, labels
 
-def get_heatmap_data(path):
-    diseased_heatmap_dir = path + 'heatmaps/diseased/'
-    non_diseased_heatmap_dir = path + 'heatmaps/non_diseased/'
+def get_heatmap_data(path, tissue_type):
+    diseased_heatmap_dir = path + 'heatmaps/' + tissue_type + '/diseased/'
+    non_diseased_heatmap_dir = path + 'heatmaps/' + tissue_type + '/non_diseased/'
     diseased_list = os.listdir(diseased_heatmap_dir)
     non_diseased_list = os.listdir(non_diseased_heatmap_dir)
     diseased_heatmaps = []
@@ -172,22 +176,55 @@ def make_training_data(d_vals, nd_vals):
 
 
 # ----- Logistic Regression model -----
-def run(x, y, folder):
-    log = LogisticRegression(C=1).fit(x, y)
-    print(log.score(x, y))
-    print(confusion_matrix(y, log.predict(x)))
-    with open(folder + 'log_model.pkl', 'wb') as f:
+def run(X, y, folder, tissue_type):
+    kf = KFold(3)
+    models = []
+    cms = []
+    scores = []
+    aucs = []
+    for train_index, test_index in kf.split(X):
+        X_train, X_test = X[train_index], X[test_index]
+        y_train, y_test = y[train_index], y[test_index]
+        log = LogisticRegression(C=1).fit(X_train, y_train)
+        scores.append(log.score(X_test, y_test))
+        cms.append(confusion_matrix(y_test, log.predict(X_test)))
+        fpr, tpr, _ = roc_curve(1-y_test, log.predict_proba(X_test)[:, 0])
+        roc_auc = roc_auc_score(1-y_test, log.predict_proba(X_test)[:, 0])
+        plt.plot(fpr, tpr)
+        aucs.append(roc_auc)
+    plt.plot(np.arange(len(y_test))/len(y_test), np.arange(len(y_test))/len(y_test), linestyle='--')
+    plt.title("Average AUC: " + str(round(np.mean(aucs), 4)))
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.savefig(folder + '/' + tissue_type + '_Log_Roc_Curve.png')
+    #plt.show()
+    with open(folder + '/' + tissue_type +'_log_model.pkl', 'wb') as f:
         pickle.dump(log, f)
+
+    with open("./deployment_models/{}_Log_Model.txt".format(tissue_type), 'w') as f:
+        f.write("Results\n\n")
+        f.write("Evaluation loss and accuracy:\n")
+        f.write(str(scores))
+        f.write("\n\nConfusion matrix\n")
+        f.write(str(cms))
+        f.write("\n\n***History***\n")
+        f.write("Loss\n")
+        f.write(str(history["loss"]))
+        f.write("\n\nAccuracy\n")
+        f.write(str(history["accuracy"]))
+        f.write("\n\nVal_loss\n")
+        f.write(str(history["val_loss"]))
+        f.write("\n\nVal_accuracy\n")
+        f.write(str(history["val_accuracy"]))
+        f.write('\n\n')
 
 
 if __name__ == "__main__":
-    data_path = '../data/tiles/'
-    data_path = sys.argv[1]
-    tissue_type = sys.argv[2]
-    precision = sys.argv[3]
-    TILE_INCREMENT = TILE_SIZE // int(precision)
-    model = make_model('experiment3/{}_weights.h5'.format(tissue_type))
-    #make_heatmaps(data_path, model)
-    (diseased_heatmaps_vals, non_diseased_heatmaps_vals) = get_heatmap_data(data_path)
+    data_path = '../data/research/'
+    tissue_type = sys.argv[1]
+    if True:
+        model = make_model('experiment3/{}_weights.h5'.format(tissue_type))
+        make_heatmaps(data_path, model, tissue_type)
+    (diseased_heatmaps_vals, non_diseased_heatmaps_vals) = get_heatmap_data(data_path, tissue_type)
     training_data, training_labels = make_training_data(diseased_heatmaps_vals, non_diseased_heatmaps_vals)
-    run(training_data, training_labels, 'deployment_models/')
+    run(training_data, training_labels, 'deployment_models/', tissue_type)
